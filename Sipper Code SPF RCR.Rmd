@@ -1,0 +1,1122 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+# Initial Sipper Analysis Code
+
+## Product:
+
+## Input:
+
+## A directory (folder) of a given group's (e.g., 18-week-old males) sipper .csv outputs across days.
+This is selected by changing the line(s) below "SET THE WORKING DIRECTORY" (Line #117) to the directory of interest.
+
+## The naming convention of files in this directory should be as follows, with spaces as separations:
+
+  ## Experimental Day, Day #, Group (EtOH or H2O), Side of EtOH bottle, Sample ID,  Date
+  
+  ##e.g., "Day 1 EtOH Left 12 022624"
+
+```{r}
+################################################################################
+#PURPOSE:Analyze data from mouse sipper results
+#
+#AUTHOR: SEAN P. FARRIS
+#
+#DATE:11/09/2021
+#UPDATED THE CODE TO CORRECT A BUG IN GREPPING THE PROPER SAMPLES
+################################################################################
+
+options(stringsAsFactors = F, warn=-1)
+
+################################################################################
+#CUSTOM FUNCTION TO CALL MEAN +/- SE
+#SOURCE: http://www.cookbook-r.com/Graphs/Plotting_means_and_error_bars_(ggplot2)/
+## Gives count, mean, standard deviation, standard error of the mean, and confidence interval (default 95%).
+##   data: a data frame.
+##   measurevar: the name of a column that contains the variable to be summariezed
+##   groupvars: a vector containing names of columns that contain grouping variables
+##   na.rm: a boolean that indicates whether to ignore NA's
+##   conf.interval: the percent range of the confidence interval (default is 95%)
+
+summarySE <- function(data=NULL, measurevar, groupvars=NULL, na.rm=FALSE,
+                      conf.interval=.95, .drop=TRUE) {
+  library(plyr)
+  
+  # New version of length which can handle NA's: if na.rm==T, don't count them
+  length2 <- function (x, na.rm=FALSE) {
+    if (na.rm) sum(!is.na(x))
+    else       length(x)
+  }
+  
+  # This does the summary. For each group's data frame, return a vector with
+  # N, mean, and sd
+  datac <- ddply(data, groupvars, .drop=.drop,
+                 .fun = function(xx, col) {
+                   c(N    = length2(xx[[col]], na.rm=na.rm),
+                     mean = mean   (xx[[col]], na.rm=na.rm),
+                     sd   = sd     (xx[[col]], na.rm=na.rm)
+                   )
+                 },
+                 measurevar
+  )
+  
+  # Rename the "mean" column    
+  datac <- rename(datac, c("mean" = measurevar))
+  
+  datac$se <- datac$sd / sqrt(datac$N)  # Calculate standard error of the mean
+  
+  # Confidence interval multiplier for standard error
+  # Calculate t-statistic for confidence interval: 
+  # e.g., if conf.interval is .95, use .975 (above/below), and use df=N-1
+  ciMult <- qt(conf.interval/2 + .5, datac$N-1)
+  datac$ci <- datac$se * ciMult
+  
+  return(datac)
+}
+################################################################################
+#CREATE A NUMERIC CONTAINER FOR CONVERTIME TIME VALUES INTO SEQUENTIAL COUNTS WITH 10:00 AM STARTING AS "0"; AND 10:01 AS "1"
+
+minute_vals <- as.character(seq(0, 59, by=1))
+
+for (x in 1:length(minute_vals)){
+  split_min_vals <- strsplit(minute_vals[x], split="")[[1]]
+  if (length(split_min_vals)==1){
+    minute_vals[x] <- paste0("0", minute_vals[x])
+  }
+}
+
+hour_vals <- c("10", "11", "12", "13", "14", "15", "16", "17", "18",
+               "19", "20", "21", "22", "23", "0", "1", "2", "3",
+               "4", "5", "6", "7", "8", "9")
+
+hour_min <- NA
+
+for (x in 1:length(hour_vals)){
+  for (y in 1:length(minute_vals)){
+    indiv_val <- paste(hour_vals[x], minute_vals[y], sep=":")
+    hour_min  <- c(hour_min, indiv_val)
+  }
+}
+
+hour_min <- hour_min[!is.na(hour_min)]
+
+rld_seq_time <- seq(0, length(hour_min)-1, by=1)
+
+time_rldseq_df <- data.frame(Time=hour_min, Time_Number=rld_seq_time)
+
+################################################################################
+#LOAD ANY NECESSARY LIBRARIES
+library("ggplot2")
+library("patchwork")
+library("plyr")
+
+################################################################################
+#SET THE WORKING DIRECTORY
+setwd("C:/Users/rache/Downloads/Sipper/") # CHANGE TO DIRECTORY OF INTEREST 
+main_dir <- getwd()
+dir.create("results")
+dir.create("binned_files")
+dir.create("figures")
+
+#Return a list of all files
+list_files <- list.files(pattern="*.csv")
+
+#Need to identify the sample numnbers
+spl_sample_num <- strsplit(list_files, split=" ")
+sample_num_df  <- as.data.frame(do.call("rbind", spl_sample_num))
+sample_numbers <- as.character(unique(sample_num_df$V5))
+
+for (f in 1:length(sample_numbers)){
+  #Extract Sample Number 1 to start 
+  grep_sample <- grep(paste0(" ", sample_numbers[f], " "), list_files)
+  sample_files <- list_files[c(grep_sample)]
+  
+  spl_files <- strsplit(sample_files, split=" ")
+  spl_df <- as.data.frame(ldply(spl_files))
+  spl_df2 <- spl_df[c(which(spl_df$V5==sample_numbers[f])), ]
+  
+  real_samples <- NA
+  
+  for (x in 1:nrow(spl_df2)){
+    indiv_file <- paste(spl_df2[x, ], collapse = " ")
+    real_samples <- c(real_samples, indiv_file)
+  }
+  
+  real_samples <- real_samples[!is.na(real_samples)]
+  
+  sample_files <- real_samples
+  #The data is currently collected  every !10 seconds
+  #NEED TO BIN THE DATA BY COUNTS/DURATION PER MINUTE
+  
+  #CREATE A LIST TO HOLD ALL THE DATAFRAME
+  sample_list <- list()
+  
+  for (i in 1:length(sample_files)){
+    print(paste(i, sample_files[i], length(sample_files), sep=" : "))
+    file_in <- read.csv(sample_files[i])
+    new_file_df <- as.data.frame(matrix(nrow=nrow(file_in), ncol=ncol(file_in)))
+    names(new_file_df) <- names(file_in)
+    
+    new_file_df[, 1] <- file_in[ , 1]
+    new_file_df[, 2] <- file_in[ , 2]
+    new_file_df[, 3] <- file_in[ , 3]
+    new_file_df[, 8] <- file_in[, 8]
+    
+    
+    for (x in 2:nrow(file_in)){
+      
+      #Check the "LeftCount"
+      if (file_in$LeftCount[x] > file_in$LeftCount[x-1]){
+        new_file_df$LeftCount[x] <- (file_in$LeftCount[x] - file_in$LeftCount[x-1])
+      } else {
+        new_file_df$LeftCount[x] <- NA
+      }
+      
+      #Check the "RightCount"
+      if (file_in$RightCount[x] > file_in$RightCount[x-1]){
+        new_file_df$RightCount[x] <- (file_in$RightCount[x] - file_in$RightCount[x-1])
+      } else {
+        new_file_df$RightCount[x] <- NA
+      }
+      
+      #Check the "LeftDuration"
+      if (file_in$LeftDuration[x] > file_in$LeftDuration[x-1]){
+        new_file_df$LeftDuration[x] <- (file_in$LeftDuration[x] - file_in$LeftDuration[x-1])
+      } else {
+        new_file_df$LeftDuration[x] <- NA
+      }
+      
+      #Check the "RightDuration"
+      if (file_in$RightDuration[x] > file_in$RightDuration[x-1]){
+        new_file_df$RightDuration[x] <- (file_in$RightDuration[x] - file_in$RightDuration[x-1])
+      } else {
+        new_file_df$RightDuration[x] <- NA
+      }
+    }
+    
+    
+    new_file_df[is.na(new_file_df)] <- 0
+    
+    colnames(new_file_df)[1] <- "DateTime" #this was causing errors, was showing as "ï..MM.DD.YYYY.hh.mm.ss" -RCR, 3/28/24
+    
+    split_s_d <- strsplit(new_file_df$DateTime, split=" ")
+    split_s_d_df <- as.data.frame(do.call("rbind", split_s_d))
+    names(split_s_d_df) <- c("Day", "Time")
+    
+    for (y in 1:nrow(split_s_d_df)){
+      #SPLIT THE TIME VARIABLES
+      time_val <- split_s_d_df$Time[y]
+      spl_time <- strsplit(time_val, split=":")[[1]]
+      time_out <- paste(spl_time[1:2], collapse = ":")
+      split_s_d_df$Time[y] <- time_out
+      
+      #SPLIT THE DAY VARIABLES
+      day_val  <- split_s_d_df$Day[y]
+      spl_day  <- strsplit(day_val, split="/")[[1]]
+      col_day  <- paste(spl_day[1], spl_day[2], "2021", sep="/")
+      split_s_d_df$Day[y] <- col_day
+    }
+    
+    new_file_df <- as.data.frame(cbind(new_file_df, split_s_d_df))
+    new_file_df$File_Name <- sample_files[i]
+    
+    sample_list[[i]] <- new_file_df
+    rm(new_file_df)
+  }
+  
+  #Merge all the data into a single dataframe for the sample
+  sample_df <- as.data.frame(do.call("rbind", sample_list))
+  
+  #Add additional information to the dataframe
+  file_name_spl <- strsplit(sample_df$File_Name, split=" ")
+  file_name_df  <- as.data.frame(do.call("rbind", file_name_spl))
+  file_short_df <- file_name_df[ , c(2,4,5)]
+  names(file_short_df) <- c("ExpDay", "EtOH_Side", "Sample")
+  
+  sample_df <- as.data.frame(cbind(sample_df, file_short_df))
+  
+  #SORT BY EXPERIMENTAL DAY (MANY TIMES THE EXPERIMENT WILL RUN OVERNIGHT RECORDING 2 DAYS)
+  sample_df$ExpDay <- as.numeric(sample_df$ExpDay)
+  sample_df <- sample_df[order(sample_df$ExpDay, decreasing = F), ]
+  
+  ####WORK ON THE DAY-----------------------------------------------------------
+  #TABLE THE RECORDED DAY 
+  day_table <- as.data.frame(table(sample_df$Day))
+  
+  day_list <- list()
+  
+  for (z in 1:nrow(day_table)){
+    
+    day_val <- as.character(day_table$Var1[z])
+    
+    #Subset the 'new_file_df' by day_va
+    day_val_df <- sample_df[c(sample_df$Day==day_val), ]
+    
+    #WORK OVER THE TIME VARIABLE, THE ORIGINAL SCRIPT WRITES DAY ~10 SECONDS
+    time_table_df <- as.data.frame(table(day_val_df$Time))
+    time_table_df$Device <- as.character(unique(day_val_df$Device))
+    time_table_df$LeftCount <- NA
+    time_table_df$LeftDuration <- NA
+    time_table_df$RightCount <- NA
+    time_table_df$RightDuration <- NA
+    time_table_df$Day <- day_val
+    
+    for (a in 1:nrow(time_table_df)){
+      time_val <- as.character(time_table_df$Var1[a])
+      sub_day_df <- day_val_df[c(day_val_df$Time==time_val), ]
+      time_table_df$LeftCount[a]     <- sum(sub_day_df$LeftCount)
+      time_table_df$LeftDuration[a]  <- sum(sub_day_df$LeftDuration)
+      time_table_df$RightCount[a]    <- sum(sub_day_df$RightCount)
+      time_table_df$RightDuration[a] <- sum(sub_day_df$RightDuration)
+      rm(sub_day_df)
+    }
+    
+    names(time_table_df)[1] <- "Time"
+    nondup_day_val_df <- day_val_df[!duplicated(day_val_df$Time), ]
+    nondup_short_df   <- nondup_day_val_df[, c("BatteryVoltage", "Time",
+                                               "File_Name", "ExpDay", 
+                                               "EtOH_Side", "Sample")]
+    merge_table_nondup <- merge(time_table_df, nondup_short_df, by="Time")
+    merge_num_time_df  <- merge(merge_table_nondup, time_rldseq_df, by="Time", all=T)
+    merge_num_time_df  <- merge_num_time_df[order(merge_num_time_df$Time_Number, decreasing = F), ]
+    
+    for (a in 2:nrow(merge_num_time_df)){
+      #CHECK FOR MISSING VALUES AFTER MERGING DATAFRAMES
+      if (is.na(merge_num_time_df$Device[a])){
+        merge_num_time_df$Device[a]    <- merge_num_time_df$Device[a-1]
+        merge_num_time_df$Day[a]       <- merge_num_time_df$Day[a-1]
+        merge_num_time_df$File_Name[a] <- merge_num_time_df$File_Name[a-1]
+        merge_num_time_df$ExpDay[a]    <- merge_num_time_df$ExpDay[a-1]
+        merge_num_time_df$EtOH_Side[a] <- merge_num_time_df$EtOH_Side[a-1]
+        merge_num_time_df$Sample[a]    <- merge_num_time_df$Sample[a-1]
+      }
+    }
+    
+    na_dev_table <- as.data.frame(table(is.na(merge_num_time_df$Device)))
+    na_true      <- which(na_dev_table$Var1=="TRUE")
+    
+    if (length(na_true) > 0){
+      find_1stnonna_val <- which(!is.na(merge_num_time_df$Device))[1]
+      
+      merge_num_time_df$Device[which(is.na(merge_num_time_df$Device))]    <- merge_num_time_df$Device[find_1stnonna_val]
+      merge_num_time_df$Day[which(is.na(merge_num_time_df$Day))]       <- merge_num_time_df$Day[find_1stnonna_val]
+      merge_num_time_df$File_Name[which(is.na(merge_num_time_df$File_Name))] <- merge_num_time_df$File_Name[find_1stnonna_val]
+      merge_num_time_df$ExpDay[which(is.na(merge_num_time_df$ExpDay))]    <- merge_num_time_df$ExpDay[find_1stnonna_val]
+      merge_num_time_df$EtOH_Side[which(is.na(merge_num_time_df$EtOH_Side))] <- merge_num_time_df$EtOH_Side[find_1stnonna_val]
+      merge_num_time_df$Sample[which(is.na(merge_num_time_df$Sample))]    <- merge_num_time_df$Sample[find_1stnonna_val]
+    }
+    
+    day_list[[z]] <- merge_num_time_df
+    rm(time_table_df)
+    rm(merge_num_time_df)
+  }
+  
+  #COMBINE ALL OF THE DAY DATA TOGETHER
+  day_df <- as.data.frame(do.call("rbind", day_list))
+  
+  #TEST FOR MISSING VALUES INTRODUCED AS 'NA'
+  na_len <- which(is.na(day_df$Time_Number))
+  
+  if (length(na_len) > 0){
+    day_df <- day_df[-c(which(is.na(day_df$Time_Number))), ]
+  }
+  
+  ####
+  #ALL DATA IS NOW SUMMARIZED PER MINUTE FOR THE SAME ANIMAL/CAGE PER DAILY EXPERIMENT
+  ####
+  
+  #CREATE A WATER COUNT/DURATION COLUMN
+  day_df$H2O_Count    <- NA
+  day_df$H2O_Duration <- NA
+  
+  #CREATE AN ETOH COUNT/DURAION COLUMN 
+  day_df$EtOH_Count    <- NA
+  day_df$EtOH_Duration <- NA
+  
+  for (x in 1:nrow(day_df)){
+    etoh_side <- day_df$EtOH_Side[x]
+    
+    if (etoh_side=="Right"){
+      
+      day_df$H2O_Count[x]     <- day_df$LeftCount[x]
+      day_df$H2O_Duration[x]  <- day_df$LeftDuration[x]
+      day_df$EtOH_Count[x]    <- day_df$RightCount[x]
+      day_df$EtOH_Duration[x] <- day_df$RightDuration[x]
+      
+    } else {
+      
+      day_df$H2O_Count[x]     <- day_df$RightCount[x]
+      day_df$H2O_Duration[x]  <- day_df$RightDuration[x]
+      day_df$EtOH_Count[x]    <- day_df$LeftCount[x]
+      day_df$EtOH_Duration[x] <- day_df$LeftDuration[x]
+      
+    }
+    
+  }
+  
+  #ADD THE LIGHT/DARK CYCLE INFO TO THE DATAFRAME
+  day_df$Cycle <- NA
+  
+  for (x in 1:nrow(day_df)){
+    time_val <- day_df$Time_Number[x]
+    if (time_val <= 720){
+      day_df$Cycle[x] <- "Dark"
+    } else {
+      day_df$Cycle[x] <- "Light"  
+    }
+  }
+  
+  #WRITE THE DATA TO THE BINNED FILES FOLDER
+  #WRITE THE SAMPLE TO OUTPUT AS A TAB-DELIMITED FILE
+  setwd(paste(main_dir, "binned_files", sep="/"))
+  
+  write.table(day_df, file=paste("Sample", sample_numbers[f], 
+                                  "1min_bins_spf.txt", sep="_"),
+              row.names=F, quote=F, sep="\t")
+  
+  setwd(main_dir)
+  
+}
+
+######BIN THE DATA BY DIFFERENT PERIODS OF TIME---------------------------------
+time_bins <- c(1, 60)
+
+#NAVIGATE TO NEW WORKING DIRECTORY TO SAVE BINNED VALUES TO FILE
+setwd(paste(main_dir, "binned_files", sep="/"))
+
+#LIST PROCESSED FILES FOR BINNING PERIODS OF TIME
+processed_files <- list.files(pattern="_1min_bins_")
+
+processed_list <- list()
+
+for (x in 1:length(processed_files)){
+  print(paste(x, processed_files[x], length(processed_files), sep=" : "))
+  indiv_file <- read.delim(processed_files[x])
+  
+  #SUBSET DATA BY DATE
+  unique_date <- unique(indiv_file$Day)
+  
+  date_list <- list()
+  
+  for (y in 1:length(unique_date)){
+    sub_date_df <- indiv_file[c(indiv_file$Day==unique_date[y]), ]
+    
+    sub_date_df$Time_Vals <- seq(1, 1440, by=1)
+    
+    merge_subdf <- sub_date_df
+    
+    #BIN THE DATA BY TIME PER DAY
+    time_list <- list()
+    
+    for (z in 1:length(time_bins)) {
+      bin_val  <- time_bins[z]
+      
+      bin_seq <- seq(from=1, to=1440, by=bin_val)
+      
+      if (max(bin_seq) != 1440){
+        bin_seq <- c(bin_seq, 1440)
+      } else {
+        bin_seq <- bin_seq
+      }
+      
+      temp_list <- list()
+      
+      a=1
+      while (a < length(bin_seq)){
+        
+        if (a+1 != length(bin_seq)){
+          
+          time_sub_df <- merge_subdf[c(bin_seq[a]:c(bin_seq[(a+1)]-1)), ]
+          summed_vals <- colSums(time_sub_df[, c(4,5,6,7,15,16,17,18)], na.rm = T)
+          trim_sub_df <- as.data.frame(time_sub_df[1, ])
+          trim_sub_df[ , c(4,5,6,7,15,16,17,18)] <- summed_vals
+          trim_sub_df$Bin_Time <- as.character(paste(bin_val, "min"))
+          temp_list[[a]] <- trim_sub_df
+          a=a+1
+          
+        } else {
+          
+          time_sub_df <- merge_subdf[c((bin_seq[a]):c(bin_seq[(a+1)])), ]
+          summed_vals <- colSums(time_sub_df[, c(4,5,6,7,15,16,17,18)])
+          trim_sub_df <- as.data.frame(time_sub_df[1, ])
+          trim_sub_df[ , c(4,5,6,7,15,16,17,18)] <- summed_vals
+          trim_sub_df$Bin_Time <- as.character(paste(bin_val, "min"))
+          temp_list[[a]] <- trim_sub_df
+          a=a+1
+          
+        }
+        
+        temp_df <- as.data.frame(do.call("rbind", temp_list))
+        temp_df <- temp_df[ , -19]
+      }
+      
+      time_list[[z]] <- temp_df
+      
+      rm(temp_df)
+      
+    }
+    
+    bin_time_df <- as.data.frame(do.call("rbind", time_list))
+    
+    date_list[[y]] <- bin_time_df
+    
+    rm(bin_time_df)
+    
+  }
+  
+  
+  all_dates_df <- as.data.frame(do.call("rbind", date_list))
+  
+  processed_list[[x]] <- all_dates_df
+  
+  rm(all_dates_df)
+  
+}
+
+for (x in 1:length(processed_list)){
+  proc_df <- processed_list[[x]]
+  samp_num <- proc_df$Sample[1]
+  
+  #WRITE THE FILE TO OUTPUT FOLDER
+  write.table(proc_df, file=paste("Sample", samp_num, 
+                                  "binned_values_spf.txt", sep="_"),
+              row.names=F, quote=F, sep="\t")
+}
+
+
+####NEED TO SUMMARIZE THE AVERAGES ACROSS TIME ---------------------------------
+all_dataset <- do.call("rbind", lapply(processed_files,
+                                       FUN=function(files){read.delim(files, )}))
+
+#BREAK UP THE DATA TO GET THE AVERAGES ACROSS SAMPLES FOR EACH EXPERIMENTAL DAY (i.e. ExpDay)
+expday_vec  <- as.character(unique(all_dataset$ExpDay))
+expday_list <- list()
+
+for (x in 1:length(expday_vec)){
+  sub_expday_df <- all_dataset[c(all_dataset$ExpDay==expday_vec[x]), ]
+  
+  #SUMMARIZE THE ETHANOL COUNT DATA 
+  etoh_count_summary <- summarySE(sub_expday_df, 
+                                  measurevar = "EtOH_Count",
+                                  groupvars = "Time_Number",
+                                  na.rm=T)
+  etoh_count_summary[etoh_count_summary==0] <- NA
+  etoh_count_summary[1,1] <- 0
+  etoh_count_summary$Exp_Day <- expday_vec[x]
+  etoh_count_summary$Summary <- rep("EtOH_Count")
+  names(etoh_count_summary)[3] <- "Mean"
+  
+  #SUMMARIZE THE WATER COUNT DATA 
+  water_count_summary <- summarySE(sub_expday_df, 
+                                   measurevar = "H2O_Count",
+                                   groupvars = "Time_Number",
+                                   na.rm=T)
+  water_count_summary[water_count_summary==0] <- NA
+  water_count_summary[1,1] <- 0
+  water_count_summary$Exp_Day <- expday_vec[x]
+  water_count_summary$Summary <- rep("H2O_Count")
+  names(water_count_summary)[3] <- "Mean"
+  
+  #SUMMARIZE THE ETHANOL DURATION DATA 
+  etoh_duration_summary <- summarySE(sub_expday_df, 
+                                     measurevar = "EtOH_Duration",
+                                     groupvars = "Time_Number",
+                                     na.rm=T)
+  etoh_duration_summary[etoh_duration_summary==0] <- NA
+  etoh_duration_summary[1,1] <- 0
+  etoh_duration_summary$Exp_Day <- expday_vec[x]
+  etoh_duration_summary$Summary <- rep("EtOH_Duration")
+  names(etoh_duration_summary)[3] <- "Mean"
+  
+  #SUMMARIZE THE WATER DURATION DATA 
+  water_duration_summary <- summarySE(sub_expday_df, 
+                                      measurevar = "H2O_Duration",
+                                      groupvars = "Time_Number",
+                                      na.rm=T)
+  water_duration_summary[water_duration_summary==0] <- NA
+  water_duration_summary[1,1] <- 0
+  water_duration_summary$Exp_Day <- expday_vec[x]
+  water_duration_summary$Summary <- rep("H2O_Duration")
+  names(water_duration_summary)[3] <- "Mean"
+  
+  #COMBINE THE SUMMARIZED INFORMATION ABOVE INTO A SINGLE DATAFRAME
+  comb_summary_df <- as.data.frame(rbind(water_count_summary,
+                                         water_duration_summary,
+                                         etoh_count_summary,
+                                         etoh_duration_summary))
+  
+  expday_list[[x]] <- comb_summary_df
+  rm(comb_summary_df)
+  
+}
+
+#COMBINED ALL THE SUMMARIZED DAYS TOGETHER
+expday_summary_df <- as.data.frame(do.call("rbind", expday_list))
+
+#SUMMARIZE THE VALUES ACROSS ALL DAYS
+expday_all_etohcount <- summarySE(all_dataset, 
+                                  measurevar = "EtOH_Count",
+                                  groupvars = "Time_Number",
+                                  na.rm=T)
+
+expday_all_etohcount[expday_all_etohcount==0] <- NA
+expday_all_etohcount[1,1] <- 0
+expday_all_etohcount$Exp_Day <- "ALL"
+expday_all_etohcount$Summary <- rep("EtOH_Count")
+names(expday_all_etohcount)[3] <- "Mean"
+
+expday_all_watercount <- summarySE(all_dataset, 
+                                   measurevar = "H2O_Count",
+                                   groupvars = "Time_Number",
+                                   na.rm=T)
+
+expday_all_watercount[expday_all_watercount==0] <- NA
+expday_all_watercount[1,1] <- 0
+expday_all_watercount$Exp_Day <- "ALL"
+expday_all_watercount$Summary <- rep("H2O_Count")
+names(expday_all_watercount)[3] <- "Mean"
+
+
+expday_all_etohdurat <- summarySE(all_dataset, 
+                                  measurevar = "EtOH_Duration",
+                                  groupvars = "Time_Number",
+                                  na.rm=T)
+
+expday_all_etohdurat[expday_all_etohdurat==0] <- NA
+expday_all_etohdurat[1,1] <- 0
+expday_all_etohdurat$Exp_Day <- "ALL"
+expday_all_etohdurat$Summary <- rep("EtOH_Duration")
+names(expday_all_etohdurat)[3] <- "Mean"
+
+
+expday_all_waterdurat <- summarySE(all_dataset, 
+                                   measurevar = "H2O_Duration",
+                                   groupvars = "Time_Number",
+                                   na.rm=T)
+
+expday_all_waterdurat[expday_all_waterdurat==0] <- NA
+expday_all_waterdurat[1,1] <- 0
+expday_all_waterdurat$Exp_Day <- "ALL"
+expday_all_waterdurat$Summary <- rep("H2O_Duration")
+names(expday_all_waterdurat)[3] <- "Mean"
+
+expday_all_df <- as.data.frame(rbind(expday_all_etohcount,
+                                     expday_all_watercount,
+                                     expday_all_etohdurat,
+                                     expday_all_waterdurat))
+
+expday_combined_df <- as.data.frame(rbind(expday_summary_df,
+                                          expday_all_df))
+
+#CREATE A RESULTS FOLDER IN THE MAIN DIRECTORY
+setwd(main_dir)
+setwd(paste(main_dir, "results", sep="/"))
+
+#WRITE THE SUMMARIZED RESULTS TO THE RESULTS FOLDER
+write.table(expday_combined_df, file="expday_meansummary_day_spf.txt",
+            row.names=F, quote=F, sep="\t")
+
+#RETURN TO THE MAIN DIRECTORY
+setwd(main_dir)
+
+####NEED TO SUMMARIZE THE BINNED DATA------------------------------------------
+
+#SET THE WORKING DIRECTORY FOR THE PREVIOUSLY BINNED FILES
+setwd(paste(main_dir, "binned_files", sep="/"))
+dir(".")
+
+#RETRIEVE A LIST OF THE BINNED FILES
+bin_files <- list.files(pattern="_binned_values_")
+
+#CREATE A COMMON DATAFRAME FOR THE BINNED VALUES
+binned_dataset <- do.call("rbind", lapply(bin_files,
+                                          FUN=function(files){read.delim(files)}))
+
+#GET A VECTOR OF UNIQUE BIN TIMES
+bin_times <- unique(binned_dataset$Bin_Time)
+
+binned_list <- list()
+all_bin_list <- list()
+all_peranimal_list <- list() #I STILL NEED TO SUMMARIZE THE DATA PER ANIMAL ACROSS ALL DAYS, RATHER THAN JUST COMBINED FOR ALL ANIMALS ACROSS ALL DAYS. THIS WILL DETERMINE IF THE BINNED AVERAGES ACROSS ALL DAYS ARE SIMILIAR BETWEEN ANIMALS. FOR EXAMPLE DO ALL OF THE INDIVIDUALS SAMPLES HAVE THE SAME 'RAMPING' CURVE OBSERVED RELATED TO CIRCADIAN RHYTHM ACTIVITY, OR DO INDIVIDUAL ANIMALS HAVE DIFFERENT PEAK AND VALLEY PERIODS FOR SIPPIN ACTIVITY
+
+#LOOP THROUGH THE BIN TIMES 
+for (x in 1:length(bin_times)){
+  binned_val <- bin_times[x]
+  
+  #SUBSET BY THE BIN VARIABLE
+  sub_bin_df <- binned_dataset[c(binned_dataset$Bin_Time==binned_val), ]
+  
+  #GET A VECTOR OF THE DAYS
+  exp_day_var <- unique(binned_dataset$Day)
+  
+  #CREATE A TEMPORARY LIST TO HOLD THE DATA
+  expday_bin_list <- list()
+  
+  for (y in 1:length(exp_day_var)){
+    
+    #SUBSET THE DATA BY EXPERIMENTAL DAY 
+    sub_expday_df <- sub_bin_df[c(sub_bin_df$Day==exp_day_var[y]), ]
+    
+    #CREATE A VECTOR OF THE MAIN VARIABLES TO SUMMARIZE
+    sum_variables <- c("EtOH_Count", "EtOH_Duration", "H2O_Count", "H2O_Duration")
+    
+    sum_var_list <- list()
+    
+    for (z in 1:length(sum_variables)){
+      
+      sum_data <- summarySE(sub_expday_df, 
+                            measurevar = sum_variables[z],
+                            groupvars = "Time_Number",
+                            na.rm=T)
+      
+      sum_data[sum_data==0] <- NA
+      sum_data[1,1] <- 0
+      sum_data$Exp_Day <- exp_day_var[y]
+      sum_data$Summary <- sum_variables[z]
+      sum_data$Bin_Val <- binned_val
+      names(sum_data)[3] <- "Mean"
+      
+      sum_var_list[[z]] <- sum_data
+    }
+    
+    sum_var_df <- as.data.frame(do.call("rbind", sum_var_list))
+    
+    expday_bin_list[[y]] <- sum_var_df
+    
+  }
+  
+  expday_bin_df <- as.data.frame(do.call("rbind", expday_bin_list))
+  
+  #SAVE DAILY BINNED DATA TO BINNED LIST
+  binned_list[[x]] <- expday_bin_df
+  
+  #NEED TO ANALYZE ALL DAYS COMBINED FOR EACH BIN VARIABLE
+  #CREATE A VECTOR OF THE MAIN VARIABLES TO SUMMARIZE
+  sum_variables <- c("EtOH_Count", "EtOH_Duration", "H2O_Count", "H2O_Duration")
+  
+  sum_var_list2 <- list()
+  animal_var_list <- list()
+  
+  for (z in 1:length(sum_variables)){
+    
+    sum_data <- summarySE(sub_bin_df, 
+                          measurevar = sum_variables[z],
+                          groupvars = "Time_Number",
+                          na.rm=T)
+    
+    sum_data[sum_data==0] <- NA
+    sum_data[1,1] <- 0
+    sum_data$Exp_Day <- exp_day_var[y]
+    sum_data$Summary <- sum_variables[z]
+    sum_data$Bin_Val <- binned_val
+    names(sum_data)[3] <- "Mean"
+    
+    sum_var_list2[[z]] <- sum_data
+    
+    unique_sample_num <- unique(sub_bin_df$Sample)
+    
+    #NEED TO SUMMARIZE THE DATA ACROSS ALL DAYS FOR EACH ANIMAL 
+    animal_list <- list()
+    
+    for (animal in 1:length(unique_sample_num)){
+      
+      animal_bin_df <- as.data.frame(sub_bin_df[c(sub_bin_df$Sample==unique_sample_num[animal]), ])
+      
+      sum_animal <- summarySE(animal_bin_df, 
+                            measurevar = sum_variables[z],
+                            groupvars = "Time_Number",
+                            na.rm=T)
+      
+      sum_animal[sum_animal==0] <- NA
+      sum_animal[1,1] <- 0
+      sum_animal$Exp_Day <- "All Days Per Animal"
+      sum_animal$Summary <- sum_variables[z]
+      sum_animal$Bin_Val <- binned_val
+      names(sum_animal)[3] <- "Mean"
+      sum_animal$Sample_Num <- unique_sample_num[animal]
+      
+      animal_list[[animal]] <- sum_animal
+    }
+    
+    animal_var_list[[z]] <- as.data.frame(do.call("rbind", animal_list))
+    
+  }
+  
+  all_peranimal_list[[x]] <- as.data.frame(do.call("rbind", animal_var_list))
+  
+  all_bin_list[[x]] <- as.data.frame(do.call("rbind", sum_var_list2))
+  
+}
+
+####COMBINE THE DATA FOR EASIER ACCESS------------------------------------------
+#CREATE DATAFRAMES THAT HOLD ALL OF THE SUMMARIZED BINNED VALUES 
+binned_sum_df <- as.data.frame(do.call("rbind", binned_list))
+names(binned_sum_df)[7] <- "Day"
+all_bin_summary <- as.data.frame(do.call("rbind", all_bin_list))
+names(all_bin_summary)[7] <- "Day"
+all_bin_summary$Day <- "All Days Combined"
+per_animal_sum_df <- as.data.frame((do.call("rbind", all_peranimal_list)))
+
+
+#WRITE THE SUMMARIZED FILES TO RESULTS
+setwd(paste(main_dir, "results", sep="/"))
+
+write.table(binned_sum_df, file="indiv_binvalues_summary_spf.txt",
+            row.names=F, quote=F, sep="\t")
+write.table(all_bin_summary, file="all_binvalues_cobminedsummary_spf.txt",
+            row.names=F, quote=F, sep="\t")
+write.table(per_animal_sum_df, file="persample_binvalues_combinedsummary_spf.txt",
+            row.names=F, quote=F, sep="\t")
+
+setwd(main_dir)
+
+#####THIS IS FOR PLOTTING OF SAMPLES/ANIMALS####################################
+#FIRST CREATE THE 1 MINUNTE BIN PLOTS 
+setwd(paste(main_dir, "binned_files", sep="/"))
+
+one_min_bin_files <- list.files(patter="_1min_bins_")
+
+#Make sure we are in the correct directory for saving figures
+setwd(paste(main_dir, "figures", sep="/"))
+
+#Create the pdf file that will contain the one minute binned plots
+pdf(file="one_bin_plot_spf.pdf", height=8.5, width=14)
+
+for (x in 1:length(one_min_bin_files)){
+  print(one_min_bin_files[x])
+  #Make sure to be in the correct directory for reading a file into R
+  setwd(paste(main_dir, "binned_files", sep="/"))
+  
+  #Read in the file
+  day_df <- read.delim(one_min_bin_files[x])
+  
+  #Navigate to the figures directory for saving data
+  setwd(paste(main_dir, "figures", sep="/"))
+  
+  #Convert the Experimental Session/Day to a factor for plotting
+  day_df$ExpDay <- as.numeric(day_df$ExpDay)
+  day_df$ExpDay <- factor(day_df$ExpDay, 
+                          levels=unique(day_df$ExpDay[order(day_df$ExpDay, decreasing = F)]))
+  etoh_non_na <- day_df$EtOH_Count[!is.na(day_df$EtOH_Count)]
+  etoh_max <- max(etoh_non_na)
+  
+  h20_non_na  <- day_df$H2O_Count[!is.na(day_df$H2O_Count)]
+  h20_max <- max(h20_non_na)
+  max_y_val <- max(c(etoh_max, h20_max))
+  
+  #CREATE A BAR PLOT OF THE SIPPER COUNTS BY TIME 
+  etoh_time <- ggplot(day_df, aes(x=Time_Number, y=EtOH_Count,
+                                  color=ExpDay, fill=ExpDay)) +
+    geom_rect(aes(xmin=0, xmax=720, ymin=-Inf, ymax=Inf, fill=I("darkgrey"), alpha=0.1, color=NULL)) +
+    geom_bar(stat="identity") + theme_bw() +
+    ggtitle(label=paste("Sample", unique(day_df$Sample), "EtOH"))  +
+    scale_x_continuous(breaks = seq(0, 1440, by=120),
+                       labels=c("10:00AM", "12:00PM", "2:00PM", "4:00PM",
+                                "6:00PM", "8:00PM", "10:00PM", "12:00AM",
+                                "2:00AM", "4:00AM", "6:00AM", "8:00AM", 
+                                "9:59AM"), 
+                       name=NULL) + ylab("EtOH Counts") +
+    theme(legend.position="none", axis.text.x=element_text(angle = 90, vjust=0.5, hjust=1)) + facet_grid(ExpDay ~ ., scales="fixed") + ylim(0, max_y_val)
+    
+    
+  
+  water_time <- ggplot(day_df, aes(x=Time_Number, y=H2O_Count,
+                                   color=ExpDay, fill=ExpDay)) +
+    geom_rect(aes(xmin=0, xmax=720, ymin=-Inf, ymax=Inf, fill=I("darkgrey"), alpha=0.1, color=NULL)) +
+    geom_bar(stat="identity") + theme_bw() +
+    facet_grid(ExpDay ~ ., scales="fixed") +
+    ggtitle(label=paste("Sample", unique(day_df$Sample), "Water")) +
+    scale_x_continuous(breaks = seq(0, 1440, by=120),
+                       labels=c("10:00AM", "12:00PM", "2:00PM", "4:00PM",
+                                "6:00PM", "8:00PM", "10:00PM", "12:00AM",
+                                "2:00AM", "4:00AM", "6:00AM", "8:00AM", 
+                                "9:59AM"), 
+                       name=NULL) + ylab("Water Counts") +
+    theme(legend.position="none", axis.text.x=element_text(angle = 90, vjust=0.5, hjust=1)) + ylim(0, max_y_val) 
+  
+  #SHOW THE ETOH AND WATER PLOTS SIDE-BY-SIDE
+  #Print the graphs to save inside the pdf file
+  print(etoh_time + water_time)
+  
+}
+
+#Close the pdf for "one_bin_plot.pdf
+dev.off()
+
+
+######DETERMINE PERCENT LIGHT/DARK CYCLE AND CREATE PLOTS-----------------------
+setwd(paste(main_dir, "binned_files", sep="/"))
+
+one_min_bin_files <- list.files(patter="_1min_bins_")
+
+allsample_df <- do.call("rbind", lapply(one_min_bin_files,
+                                       FUN=function(files){read.delim(files)}))
+
+#CALCULATE THE TOTAL SIPPER COUNTS FOR THE DATA 
+allsample_df$Total_Count <- rowSums(allsample_df[, c(15, 17)], na.rm = T)
+allsample_df$Total_Duration <- rowSums(allsample_df[, c(16, 18)], na.rm = T)
+
+#Make sure we are in the correct directory for saving figures
+setwd(paste(main_dir, "figures", sep="/"))
+
+dark_cycle_df  <- allsample_df[c(allsample_df$Cycle=="Dark"), ]
+light_cycle_df <- allsample_df[c(allsample_df$Cycle=="Light"), ]
+
+mouse_samples <- as.character(unique(allsample_df$Sample))
+
+percent_count_df <- data.frame(Sample=as.numeric(mouse_samples), 
+                               EtOH_Dark=NA,
+                               EtOH_Light=NA,
+                               H2O_Dark=NA, 
+                               H2O_Light=NA,
+                               Total_Dark=NA,
+                               Total_Light=NA
+                               )
+
+for (x in 1:nrow(percent_count_df)){
+  sample_val <- as.character(percent_count_df$Sample[x])
+  total_df   <- allsample_df[c(allsample_df$Sample==sample_val), ]
+  dark_df    <- dark_cycle_df[c(dark_cycle_df$Sample==sample_val), ]
+  light_df   <- light_cycle_df[c(light_cycle_df$Sample==sample_val), ]
+  
+  percent_count_df[x, "EtOH_Dark"] <- sum(dark_df$EtOH_Count, na.rm=T)/sum(dark_df$Total_Count, na.rm=T) * 100
+  percent_count_df[x, "EtOH_Light"] <- sum(light_df$EtOH_Count, na.rm=T)/sum(light_df$Total_Count, na.rm=T) * 100
+  percent_count_df[x, "H2O_Dark"] <- sum(dark_df$H2O_Count, na.rm=T)/sum(dark_df$Total_Count, na.rm=T) * 100
+  percent_count_df[x, "H2O_Light"] <- sum(light_df$H2O_Count, na.rm=T)/sum(light_df$Total_Count, na.rm=T) * 100
+  percent_count_df[x, "Total_Dark"] <- (sum(dark_df$EtOH_Count, na.rm=T)+sum(dark_df$H2O_Count, na.rm=T))/sum(total_df$Total_Count) * 100
+  percent_count_df[x, "Total_Light"] <- (sum(light_df$EtOH_Count, na.rm=T)+sum(light_df$H2O_Count, na.rm=T))/sum(total_df$Total_Count) * 100
+}
+
+percent_count_df$Group <- "Pilot"
+p_total_dark  <- summarySE(percent_count_df,
+                         measurevar = "Total_Dark",
+                         groupvars = "Group", na.rm=T)
+names(p_total_dark) <- c("group", "n", "mean", "sd", "se", "ci")
+p_total_light <- summarySE(percent_count_df,
+                          measurevar = "Total_Light",
+                          groupvars = "Group", na.rm=T)
+names(p_total_light) <- c("group", "n", "mean", "sd", "se", "ci")
+p_etoh_dark   <- summarySE(percent_count_df,
+                           measurevar = "EtOH_Dark",
+                           groupvars = "Group", na.rm=T)
+names(p_etoh_dark) <- c("group", "n", "mean", "sd", "se", "ci")
+p_etoh_light <- summarySE(percent_count_df,
+                           measurevar = "EtOH_Light",
+                           groupvars = "Group", na.rm=T)
+names(p_etoh_light) <- c("group", "n", "mean", "sd", "se", "ci")
+p_h2o_dark   <- summarySE(percent_count_df,
+                           measurevar = "H2O_Dark",
+                           groupvars = "Group", na.rm=T)
+names(p_h2o_dark) <- c("group", "n", "mean", "sd", "se", "ci")
+p_h2o_light <- summarySE(percent_count_df,
+                          measurevar = "H2O_Light",
+                          groupvars = "Group", na.rm=T)
+names(p_h2o_light) <- c("group", "n", "mean", "sd", "se", "ci")
+perc_sumdf <- as.data.frame(rbind(p_total_dark,
+                                  p_total_light,
+                                  p_etoh_dark,
+                                  p_h2o_dark,
+                                  p_etoh_light,
+                                  p_h2o_light))
+perc_sumdf$group <- c("total_dark", "total_light",
+                      "etoh_dark", "h2o_dark",
+                      "etoh_light", "h2o_light")
+perc_sumdf$category <- c(rep("Percent Total Counts", 2),
+                         rep("Percent Dark Counts", 2), 
+                         rep("Percent Light Counts", 2))
+
+#Navigate to the "results" folder
+setwd(paste(main_dir, "results", sep="/"))
+
+#Write the percent summary tdata to output 
+write.table(perc_sumdf, file="percent_summary_spf.txt",
+            row.names=F, quote=F, sep="\t")
+
+#Navigate to the figures folder for the output
+setwd(paste(main_dir, "figures", sep="/"))
+
+#Create smaller dataframes for plotting
+total_perc <- perc_sumdf[c(perc_sumdf$category=="Percent Total Counts"), ]
+dark_perc <- perc_sumdf[c(perc_sumdf$category=="Percent Dark Counts"), ]
+light_perc <- perc_sumdf[c(perc_sumdf$category=="Percent Light Counts"), ]
+
+#Create the pdf file for the percent of counts
+pdf(file="percent_summary_plots_spf.pdf", height=8.5, width=14)
+
+total_per_plot <- 
+  ggplot(total_perc, aes(x=rev(group), y=mean, fill=rev(group), color=I("black"))) + 
+  geom_bar(stat="identity") +
+  geom_errorbar(ymin=total_perc$mean-total_perc$se,
+                ymax=total_perc$mean+total_perc$se, 
+                width=0.25) +
+  facet_grid(. ~ category) + 
+  ylab("Percent of Counts") + xlab("") + ylim(c(0,100)) +
+  scale_x_discrete(labels=c("Light", "Dark")) +
+  theme_bw() + scale_fill_manual(values=c("white", "darkgrey")) +
+  theme(legend.position = "none", text = element_text(size=18))
+
+dark_per_plot <- 
+  ggplot(dark_perc, aes(x=rev(group), y=mean, fill=rev(group), color=I("black"))) + 
+  geom_bar(stat="identity") +
+  geom_errorbar(ymin=dark_perc$mean-dark_perc$se,
+                ymax=dark_perc$mean+dark_perc$se, 
+                width=0.25) +
+  facet_grid(. ~ "Percent in Dark Cycle") + 
+  ylab("Percent of Counts") + xlab("") + ylim(c(0,100)) +
+  scale_x_discrete(labels=c("Water", "EtOH")) +
+  theme_bw() + scale_fill_manual(values=c("blue", "red")) +
+  theme(legend.position = "none", text = element_text(size=18))
+
+light_per_plot <- 
+  ggplot(light_perc, aes(x=rev(group), y=mean, fill=rev(group), color=I("black"))) + 
+  geom_bar(stat="identity") +
+  geom_errorbar(ymin=light_perc$mean-light_perc$se,
+                ymax=light_perc$mean+light_perc$se, 
+                width=0.25) +
+  facet_grid(. ~ "Percent in Light Cycle") + 
+  ylab("Percent of Counts") + xlab("") + ylim(c(0,100)) +
+  scale_x_discrete(labels=c("Water", "EtOH")) +
+  theme_bw() + scale_fill_manual(values=c("blue", "red")) +
+  theme(legend.position = "none", text = element_text(size=18))
+
+print(total_per_plot + dark_per_plot + light_per_plot)
+
+dev.off()
+
+####CREATE AVERAGE BINNED PLOTS-------------------------------------------------
+setwd(paste(main_dir, "results", sep="/"))
+
+#Read in the data
+bin_data_df <- read.delim("all_binvalues_cobminedsummary_spf.txt")
+
+#Navigate to the figures folder 
+setwd(paste(main_dir, "figures", sep="/"))
+
+#Create pdf for the binned data averaged together for all animals
+pdf(file="bin_plots_allanimalscombined_spf.pdf", height=8.5, width=14)
+
+for (x in 1:length(bin_times)){
+  bin_time_val <- bin_times[x]
+
+  #CREATE A PLOT OF THE 60 MINUTED BINNED SUMMARIZED DATA
+  bin_sub_df   <- bin_data_df[c(bin_data_df$Bin_Val==bin_time_val), ]
+  bin_etoh_df  <- bin_sub_df[c(bin_sub_df$Summary=="EtOH_Count"), ]
+  bin_water_df <- bin_sub_df[c(bin_sub_df$Summary=="H2O_Count"), ]
+  
+  max_bin_etoh <- max(bin_etoh_df$Mean, na.rm=T) + max(bin_etoh_df$se, na.rm=T)
+  max_bin_h20  <- max(bin_water_df$Mean, na.rm=T) + max(bin_water_df$se, na.rm=T)
+  max_bin_val  <- max(c(max_bin_etoh, max_bin_h20))
+  
+  bin_etoh_p <- ggplot(bin_etoh_df, aes(x=Time_Number, y=Mean,
+                                          fill="#F5C710")) +
+    geom_rect(aes(xmin=-Inf, xmax=720, ymin=-Inf, ymax=Inf, fill=I("darkgrey"), alpha=0.1, color=NULL)) +
+    geom_bar(stat="identity") + theme_bw() +
+    facet_grid(paste("All Samples", bin_time_val, "Bins")  ~ ., scales="free") +
+    ggtitle(label=paste("Mean", unique(bin_etoh_df$Summary[1]))) +
+    scale_x_continuous(breaks = seq(0, 1440, by=120),
+                       labels=c("10:00AM", "12:00PM", "2:00PM", "4:00PM",
+                                "6:00PM", "8:00PM", "10:00PM", "12:00AM",
+                                "2:00AM", "4:00AM", "6:00AM", "8:00AM", 
+                                "9:59AM"), 
+                       name=NULL) + ylab("Mean EtOH Counts") +
+    theme(legend.position="none", axis.text.x=element_text(angle = 90, vjust=0.5, hjust=1),
+          text=element_text(size=18)) +
+    geom_errorbar(data=bin_etoh_df, aes(ymin=Mean-se,
+                      ymax=Mean+se, width=0.5)) +
+    geom_smooth(se=F)  + ylim(0, max_bin_val)
+  
+  bin_water_p <- ggplot(bin_water_df, aes(x=Time_Number, y=Mean,
+                                        fill="#F5C710")) +
+    geom_rect(aes(xmin=-Inf, xmax=720, ymin=-Inf, ymax=Inf, fill=I("darkgrey"), alpha=0.1, color=NULL)) +
+    geom_bar(stat="identity") + theme_bw() +
+    facet_grid(paste("All Samples", bin_time_val, "Bins")  ~ ., scales="free") +
+    ggtitle(label=paste("Mean", unique(bin_water_df$Summary[1]))) +
+    scale_x_continuous(breaks = seq(0, 1440, by=120),
+                       labels=c("10:00AM", "12:00PM", "2:00PM", "4:00PM",
+                                "6:00PM", "8:00PM", "10:00PM", "12:00AM",
+                                "2:00AM", "4:00AM", "6:00AM", "8:00AM", 
+                                "9:59AM"), 
+                       name=NULL) + ylab("Mean Water Counts") +
+    theme(legend.position="none", axis.text.x=element_text(angle = 90, vjust=0.5, hjust=1),
+          text=element_text(size=18)) +
+    geom_errorbar(data=bin_water_df, aes(ymin=Mean-se,
+                                        ymax=Mean+se, width=0.5)) +
+    geom_smooth(se=F) + ylim(0, max_bin_val)
+  
+  print(bin_etoh_p + bin_water_p)
+}
+
+#Close the pdf file for "bin_plots_allanimalscombined_spf.pdf
+dev.off()
+
+####CREATE AVERAGE BINNED PLOTS FOR INDIVIDUAL ANIMALS -------------------------
+setwd(paste(main_dir, "results", sep="/"))
+
+#Read in the data
+animal_data_df <- read.delim("persample_binvalues_combinedsummary_spf.txt")
+
+#Navigate to the figures folder 
+setwd(paste(main_dir, "figures", sep="/"))
+
+#Create pdf for the binned data averaged together for all animals
+pdf(file="bin_plots_averageperanimal_spf.pdf", height=8.5, width=14)
+
+for (x in 1:length(bin_times)){
+  bin_time_val <- bin_times[x]
+  
+  #CREATE A PLOT OF THE 60 MINUTED BINNED SUMMARIZED DATA
+  bin_sub_df   <- animal_data_df[c(animal_data_df$Bin_Val==bin_time_val), ]
+  bin_etoh_df  <- bin_sub_df[c(bin_sub_df$Summary=="EtOH_Count"), ]
+  bin_water_df <- bin_sub_df[c(bin_sub_df$Summary=="H2O_Count"), ]
+  
+  max_bin_etoh <- max(bin_etoh_df$Mean, na.rm=T) + max(bin_etoh_df$se, na.rm=T)
+  max_bin_h20  <- max(bin_water_df$Mean, na.rm=T) + max(bin_water_df$se, na.rm=T)
+  max_bin_val  <- max(c(max_bin_etoh, max_bin_h20))
+  
+  bin_etoh_p <- ggplot(bin_etoh_df, aes(x=Time_Number, y=Mean,
+                                        fill=Sample_Num)) +
+    geom_rect(aes(xmin=-Inf, xmax=720, ymin=-Inf, ymax=Inf, fill=I("darkgrey"), alpha=0.1, color=NULL)) +
+    geom_bar(stat="identity") + theme_bw() +
+    facet_grid(paste("#", Sample_Num) ~ paste("All Samples", bin_time_val, "Bins"), scales="fixed") +
+    ggtitle(label=paste("Mean", unique(bin_etoh_df$Summary[1]))) +
+    scale_x_continuous(breaks = seq(0, 1440, by=120),
+                       labels=c("10:00AM", "12:00PM", "2:00PM", "4:00PM",
+                                "6:00PM", "8:00PM", "10:00PM", "12:00AM",
+                                "2:00AM", "4:00AM", "6:00AM", "8:00AM", 
+                                "9:59AM"), 
+                       name=NULL) + ylab("Mean EtOH Counts") +
+    theme(legend.position="none", axis.text.x=element_text(angle = 90, vjust=0.5, hjust=1),
+          text=element_text(size=18)) +
+    geom_errorbar(data=bin_etoh_df, aes(ymin=Mean-se,
+                                        ymax=Mean+se, width=0.5)) +
+    geom_smooth(se=F) + ylim(0, max_bin_val)
+  
+  bin_water_p <- ggplot(bin_water_df, aes(x=Time_Number, y=Mean,
+                                          fill=Sample_Num)) +
+    geom_rect(aes(xmin=-Inf, xmax=720, ymin=-Inf, ymax=Inf, fill=I("darkgrey"), alpha=0.1, color=NULL)) +
+    geom_bar(stat="identity") + theme_bw() +
+    facet_grid(paste("#", Sample_Num) ~ paste("All Samples", bin_time_val, "Bins"), scales="fixed") +
+    ggtitle(label=paste("Mean", unique(bin_water_df$Summary[1]))) +
+    scale_x_continuous(breaks = seq(0, 1440, by=120),
+                       labels=c("10:00AM", "12:00PM", "2:00PM", "4:00PM",
+                                "6:00PM", "8:00PM", "10:00PM", "12:00AM",
+                                "2:00AM", "4:00AM", "6:00AM", "8:00AM", 
+                                "9:59AM"), 
+                       name=NULL) + ylab("Mean Water Counts") +
+    theme(legend.position="none", axis.text.x=element_text(angle = 90, vjust=0.5, hjust=1),
+          text=element_text(size=18)) +
+    geom_errorbar(data=bin_water_df, aes(ymin=Mean-se,
+                                         ymax=Mean+se, width=0.5)) +
+    geom_smooth(se=F) +  ylim(0, max_bin_val)
+  
+  print(bin_etoh_p + bin_water_p)
+}
+
+dev.off()
+
+```
+
+
+
