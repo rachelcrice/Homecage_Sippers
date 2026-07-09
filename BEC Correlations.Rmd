@@ -1,0 +1,63 @@
+---
+title: "BEC Correlation"
+author: "Rachel C Rice"
+date: "2026-06-17"
+output: html_document
+---
+
+# Load necessary libraries and read in & wrangle data
+```{r}
+library(dplyr)
+library(ggplot2)
+library(tidyverse)
+library(ggpubr)
+
+stringsAsFactors = FALSE
+
+BEC_data <- read.csv("BEC_data.csv")
+
+BEC_data$Sex <- ifelse(grepl("F", BEC_data$ID), "F", "M")
+
+BEC_data$Age <- factor(BEC_data$Age, levels = c("3 wk", "6 wk", "18 wk"))
+BEC_data$Sex <- factor(BEC_data$Sex, levels = c("F", "M"))
+
+
+```
+
+# Plot Correlation
+
+```{r}
+
+BEC_corr <- ggplot(BEC_data, aes(x = Counts_at_Time, y = BEC_mgdL, 
+                                 fill = Age, shape = Sex)) +
+  geom_point(color = "black", size = 2, alpha = 0.7, stroke = 0.7) +
+  geom_smooth(method = "lm", color = "black", inherit.aes = FALSE,
+              aes(x = Counts_at_Time, y = BEC_mgdL)) +
+  scale_shape_manual(values = c("F" = 21, "M" = 24),
+                     labels = c("F" = "Female", "M" = "Male")) +
+  stat_cor(inherit.aes = FALSE,
+           aes(x = Counts_at_Time, y = BEC_mgdL),
+           method = "pearson", size = 4, fontface = "bold", 
+           r.digits = 2, p.digits = 2) +
+  scale_fill_manual(values = c("3 wk" = "#3E067D",
+                               "6 wk" = "#F70065",
+                               "18 wk" = "#277f80")) +
+  labs(x = "Counts at BEC Sampling", y = "BEC (mg/dL)", 
+       fill = "Age", shape = "Sex") +
+  ggtitle("BECs vs Sipper Counts at Time of BEC Sampling") +
+  theme_minimal() +
+  guides(
+  fill = guide_legend(override.aes = list(shape = 21, color = "black")),
+  shape = guide_legend(override.aes = list(fill = "grey50", color = "black")))+
+  theme(
+    axis.text.x  = element_text(face = "bold", size = 12),
+    axis.text.y  = element_text(face = "bold", size = 12),
+    axis.title.x = element_text(face = "bold", size = 14),
+    axis.title.y = element_text(face = "bold", size = 14, vjust = 3),
+    plot.title   = element_text(face = "bold", size = 16),
+    legend.title = element_text(face = "bold", size = 14),
+    legend.text  = element_text(face = "bold", size = 12))
+
+ggsave(file.path(getwd(), "BEC Correlation.png"),
+       width = 7, height = 5, units = "in", dpi = 600, bg = "white")
+```
