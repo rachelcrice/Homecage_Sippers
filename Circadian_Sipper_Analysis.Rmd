@@ -1,0 +1,1134 @@
+---
+title: "Home Cage Sipper — Circadian Drinking Analysis"
+author: "Rachel C. Rice"
+date: "June 23rd, 2026"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    theme: flatly
+    code_folding: hide
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE)
+```
+
+# Overview
+
+This document analyzes circadian drinking rhythms from a two-bottle choice
+home-cage sipper experiment.
+
+Factors:
+
+- Fluid group: EtOH (ethanol + water) or H2O (water only)
+- Sex
+- Age: 3 weeks, 6 weeks, 18 weeks
+
+---
+
+# Setup
+
+## Libraries
+
+```{r libraries}
+library(ggplot2)
+library(patchwork)
+library(plyr)
+library(dplyr)
+library(ez)
+library(stats)
+```
+
+## summarySE helper function
+
+Source: http://www.cookbook-r.com/Graphs/Plotting_means_and_error_bars_(ggplot2)/
+  Custom function to call mean +/- SEM
+
+```{r summarySE}
+summarySE <- function(data = NULL, measurevar, groupvars = NULL,
+                      na.rm = FALSE, conf.interval = .95, .drop = TRUE) {
+  length2 <- function(x, na.rm = FALSE) {
+    if (na.rm) sum(!is.na(x)) else length(x)
+  }
+  datac <- ddply(data, groupvars, .drop = .drop,
+                 .fun = function(xx, col) {
+                   c(N    = length2(xx[[col]], na.rm = na.rm),
+                     mean = mean(xx[[col]], na.rm = na.rm),
+                     sd   = sd(xx[[col]], na.rm = na.rm))
+                 }, measurevar)
+  datac$se <- datac$sd / sqrt(datac$N)
+  ciMult   <- qt(conf.interval / 2 + .5, datac$N - 1)
+  datac$ci <- datac$se * ciMult
+  return(datac)
+}
+```
+
+---
+
+## Time-lookup table
+
+Build a sequential time index starting at lights off
+  10:00 (lights off) = Time_Number 0
+  22:00 (lights on) = Time_Number 720
+
+Any rows recorded before 10 AM with sipper start are dropped.
+
+```{r time_lookup}
+minute_vals <- formatC(0:59, width = 2, flag = "0")
+
+hour_vals <- c("10","11","12","13","14","15","16","17","18",
+               "19","20","21","22","23","0","1","2","3",
+               "4","5","6","7","8","9")
+
+hour_min <- NA
+for (x in seq_along(hour_vals))
+  for (y in seq_along(minute_vals))
+    hour_min <- c(hour_min, paste(hour_vals[x], minute_vals[y], sep = ":"))
+
+hour_min         <- hour_min[!is.na(hour_min)]
+rld_seq_time     <- seq(0, length(hour_min) - 1)
+time_rldseq_df   <- data.frame(Time = hour_min, Time_Number = rld_seq_time)
+```
+
+---
+
+## Paths
+
+```{r paths}
+main_dir   <- "C:/Users/rache/OneDrive - University of Pittsburgh/Documents/Lab/Rotation 2/Home Cage Sipper Experiment"
+sipper_dir <- file.path(main_dir, "Sipper Data")
+
+out_dir <- sipper_dir
+for (d in c("binned_files", "results", "figures")) {
+  dir.create(file.path(out_dir, d), showWarnings = FALSE)
+}
+```
+
+---
+
+# Data ingestion & 1-min binning
+
+Note: Group metadata are derived from folder structure.
+
+Expected tree:
+    Sipper Data > [Sex] [Fluid] > [Age]_week > Day [N] [EtOH Side] [Mouse ID] [Date].CSV
+      e.g., Sipper Data/Female EtOH/3_week/Day 2 EtOH Right 22 110721.CSV
+
+  Sex = first token of the sipper_dir subfolder (Female / Male)
+  Fluid group = second token of the sipper_dir subfolder (EtOH / H2O)
+  Age = numeric prefix of the age folder, second subfolder (3 / 6 / 18)
+  Experimental Day = V2 position in filename split
+  Side of EtOH bottle = V4 position in filename split
+  Sample = V5 position in filename split
+
+```{r binning, results='hide'}
+collect_files <- function(sipper_dir) {
+  fluid_dirs <- list.dirs(sipper_dir, recursive = FALSE)
+  out <- list()
+  for (fd in fluid_dirs) {
+    tokens    <- strsplit(basename(fd), " ")[[1]]
+    sex_val   <- tokens[1]
+    fluid_val <- tokens[2]
+    age_dirs  <- list.dirs(fd, recursive = FALSE)
+    for (ad in age_dirs) {
+      age_val <- as.integer(sub("_week.*", "", basename(ad)))
+      csvs    <- list.files(ad, pattern = "\\.CSV$", full.names = TRUE,
+                            ignore.case = TRUE)
+      if (length(csvs) == 0) next
+      tmp             <- data.frame(FilePath = csvs, stringsAsFactors = FALSE)
+      tmp$Sex         <- sex_val
+      tmp$FluidGroup  <- fluid_val
+      tmp$Age         <- age_val
+      out[[length(out) + 1]] <- tmp
+    }
+  }
+  do.call("rbind", out)
+}
+
+file_meta <- collect_files(sipper_dir)
+
+fn_tokens <- strsplit(basename(file_meta$FilePath), " ")
+file_meta$Sample    <- sapply(fn_tokens, function(x) if (length(x) >= 5) x[5] else NA)
+file_meta$EtOH_Side <- sapply(fn_tokens, function(x) if (length(x) >= 4) x[4] else NA)
+file_meta$ExpDay    <- sapply(fn_tokens, function(x) if (length(x) >= 2) as.numeric(x[2]) else NA)
+
+n_before  <- nrow(file_meta)
+file_meta <- file_meta[!is.na(file_meta$FilePath) &
+                        !is.na(file_meta$Sample)   &
+                        !is.na(file_meta$EtOH_Side) &
+                        !is.na(file_meta$ExpDay), ]
+n_dropped <- n_before - nrow(file_meta)
+if (n_dropped > 0)
+  cat("WARNING: dropped", n_dropped, "file(s) with unparseable names:\n")
+
+file_meta$UniqueID <- paste(file_meta$Sex, file_meta$FluidGroup,
+                             file_meta$Age, file_meta$Sample, sep = "_")
+
+cat("\nParsed file metadata:\n")
+print(file_meta[, c("FilePath","Sex","FluidGroup","Age","Sample","UniqueID","EtOH_Side","ExpDay")])
+
+sample_ids <- unique(file_meta$UniqueID)
+
+for (f in seq_along(sample_ids)) {
+
+  samp <- sample_ids[f]
+
+  if (is.na(samp)) {
+    cat("Skipping unparseable sample ID at index", f, "\n")
+    next
+  }
+
+  out_file  <- file.path(out_dir, "binned_files",
+                         paste0("Sample_", samp, "_1min_bins_spf.txt"))
+
+  if (file.exists(out_file)) {
+    cat("Skipping already-processed sample:", samp, "\n")
+    next
+  }
+
+  samp_meta    <- file_meta[file_meta$UniqueID == samp, ]
+  sample_files <- samp_meta$FilePath
+  sample_list  <- list()
+
+  for (i in seq_along(sample_files)) {
+    cat(i, ":", sample_files[i], "\n")
+    file_in     <- read.csv(sample_files[i])
+    new_file_df <- as.data.frame(matrix(nrow = nrow(file_in),
+                                        ncol = ncol(file_in)))
+    names(new_file_df) <- names(file_in)
+    new_file_df[, 1]   <- file_in[, 1]
+    new_file_df[, 2]   <- file_in[, 2]
+    new_file_df[, 3]   <- file_in[, 3]
+    new_file_df[, 8]   <- file_in[, 8]
+
+    for (x in 2:nrow(file_in)) {
+      for (col in c("LeftCount", "RightCount", "LeftDuration", "RightDuration")) {
+        curr <- file_in[[col]][x]; prev <- file_in[[col]][x - 1]
+        new_file_df[[col]][x] <- if (!is.na(curr) && !is.na(prev) && curr > prev)
+          curr - prev else NA
+      }
+    }
+
+    new_file_df[is.na(new_file_df)] <- 0
+
+    split_s_d    <- strsplit(new_file_df$MM.DD.YYYY.hh.mm.ss, " ")
+    split_s_d_df <- as.data.frame(do.call("rbind", split_s_d))
+    names(split_s_d_df) <- c("Day", "Time")
+
+    for (y in seq_len(nrow(split_s_d_df))) {
+      spl_t <- strsplit(split_s_d_df$Time[y], ":")[[1]]
+      split_s_d_df$Time[y] <- paste(spl_t[1:2], collapse = ":")
+      spl_d <- strsplit(split_s_d_df$Day[y], "/")[[1]]
+      split_s_d_df$Day[y]  <- paste(spl_d[1], spl_d[2], spl_d[3], sep = "/")
+    }
+
+    new_file_df             <- cbind(new_file_df, split_s_d_df)
+    new_file_df$File_Name   <- sample_files[i]
+    new_file_df$ExpDay      <- samp_meta$ExpDay[i]
+    new_file_df$EtOH_Side   <- samp_meta$EtOH_Side[i]
+    new_file_df$Sex         <- samp_meta$Sex[i]
+    new_file_df$FluidGroup  <- samp_meta$FluidGroup[i]
+    new_file_df$Age         <- samp_meta$Age[i]
+    sample_list[[i]]        <- new_file_df
+    rm(new_file_df)
+  }
+
+  sample_df           <- do.call("rbind", sample_list)
+  sample_df$Sample    <- samp
+  sample_df$MouseNum  <- file_meta$Sample[file_meta$UniqueID == samp][1]
+  sample_df$ExpDay    <- as.numeric(sample_df$ExpDay)
+  sample_df           <- sample_df[order(sample_df$ExpDay), ]
+
+  day_table <- as.data.frame(table(sample_df$Day))
+  day_list  <- list()
+
+  for (z in seq_len(nrow(day_table))) {
+    day_val    <- as.character(day_table$Var1[z])
+    day_val_df <- sample_df[sample_df$Day == day_val, ]
+
+    time_table_df             <- as.data.frame(table(day_val_df$Time))
+    time_table_df$Device      <- as.character(unique(day_val_df$Device)[1])
+    time_table_df$LeftCount   <- NA; time_table_df$LeftDuration   <- NA
+    time_table_df$RightCount  <- NA; time_table_df$RightDuration  <- NA
+    time_table_df$Day         <- day_val
+
+    for (a in seq_len(nrow(time_table_df))) {
+      tv        <- as.character(time_table_df$Var1[a])
+      sub_day   <- day_val_df[day_val_df$Time == tv, ]
+      time_table_df$LeftCount[a]     <- sum(sub_day$LeftCount)
+      time_table_df$LeftDuration[a]  <- sum(sub_day$LeftDuration)
+      time_table_df$RightCount[a]    <- sum(sub_day$RightCount)
+      time_table_df$RightDuration[a] <- sum(sub_day$RightDuration)
+    }
+
+    names(time_table_df)[1]  <- "Time"
+    nondup                   <- day_val_df[!duplicated(day_val_df$Time), ]
+    nondup_short             <- nondup[, c("BatteryVoltage", "Time", "File_Name",
+                                           "ExpDay", "EtOH_Side", "Sample",
+                                           "Sex", "FluidGroup", "Age")]
+    merge1 <- merge(time_table_df, nondup_short, by = "Time")
+    merge2 <- merge(merge1, time_rldseq_df, by = "Time", all = TRUE)
+    merge2 <- merge2[order(merge2$Time_Number), ]
+
+    for (a in 2:nrow(merge2)) {
+      if (is.na(merge2$Device[a])) {
+        for (col in c("Device","Day","File_Name","ExpDay","EtOH_Side",
+                      "Sample","Sex","FluidGroup","Age"))
+          merge2[[col]][a] <- merge2[[col]][a - 1]
+      }
+    }
+    if (any(is.na(merge2$Device))) {
+      first_ok <- which(!is.na(merge2$Device))[1]
+      for (col in c("Device","Day","File_Name","ExpDay","EtOH_Side",
+                    "Sample","Sex","FluidGroup","Age"))
+        merge2[[col]][is.na(merge2[[col]])] <- merge2[[col]][first_ok]
+    }
+
+    day_list[[z]] <- merge2
+  }
+
+  day_df <- do.call("rbind", day_list)
+  day_df <- day_df[!is.na(day_df$Time_Number), ]
+
+  day_df$H2O_Count    <- NA; day_df$H2O_Duration <- NA
+  day_df$EtOH_Count   <- NA; day_df$EtOH_Duration <- NA
+
+  for (x in seq_len(nrow(day_df))) {
+    if (day_df$EtOH_Side[x] == "Right") {
+      day_df$H2O_Count[x]    <- day_df$LeftCount[x]
+      day_df$H2O_Duration[x] <- day_df$LeftDuration[x]
+      day_df$EtOH_Count[x]   <- day_df$RightCount[x]
+      day_df$EtOH_Duration[x]<- day_df$RightDuration[x]
+    } else {
+      day_df$H2O_Count[x]    <- day_df$RightCount[x]
+      day_df$H2O_Duration[x] <- day_df$RightDuration[x]
+      day_df$EtOH_Count[x]   <- day_df$LeftCount[x]
+      day_df$EtOH_Duration[x]<- day_df$LeftDuration[x]
+    }
+  }
+
+  if (unique(day_df$FluidGroup)[1] == "H2O") {
+    day_df$H2O_Count    <- day_df$LeftCount    + day_df$RightCount
+    day_df$H2O_Duration <- day_df$LeftDuration + day_df$RightDuration
+    day_df$EtOH_Count   <- 0
+    day_df$EtOH_Duration<- 0
+  }
+
+  day_df$Total_Count    <- day_df$H2O_Count    + day_df$EtOH_Count
+  day_df$Total_Duration <- day_df$H2O_Duration + day_df$EtOH_Duration
+
+  day_df$Cycle <- ifelse(day_df$Time_Number < 720, "Dark", "Light")
+
+  write.table(day_df,
+              file      = out_file,
+              row.names = FALSE, quote = FALSE, sep = "\t")
+  cat("Written:", out_file, "\n")
+}
+```
+
+---
+
+# 60-min binning
+
+```{r sixty_min_bins, results='hide'}
+setwd(file.path(out_dir, "binned_files"))
+one_min_files   <- list.files(pattern = "_1min_bins_spf\\.txt$", full.names = TRUE)
+allsample_df    <- as.data.frame(do.call("rbind", lapply(one_min_files, read.delim,
+                                                    stringsAsFactors = FALSE)))
+allsample_df$ExpDay <- as.numeric(allsample_df$ExpDay)
+
+processed_list <- list()
+
+for (x in seq_along(one_min_files)) {
+  indiv_file  <- read.delim(one_min_files[x], stringsAsFactors = FALSE)
+  unique_date <- unique(indiv_file$Day)
+  date_list   <- list()
+
+  for (y in seq_along(unique_date)) {
+    sub_date_df           <- indiv_file[indiv_file$Day == unique_date[y], ]
+    sub_date_df$Time_Vals <- seq_len(nrow(sub_date_df))
+    bin_val               <- 60
+    bin_seq               <- seq(1, 1440, by = bin_val)
+    if (max(bin_seq) != 1440) bin_seq <- c(bin_seq, 1440)
+    temp_list <- list()
+    a <- 1
+    while (a < length(bin_seq)) {
+      end_idx  <- if (a + 1 != length(bin_seq)) bin_seq[a + 1] - 1 else bin_seq[a + 1]
+      time_sub <- sub_date_df[bin_seq[a]:end_idx, ]
+      sum_cols <- intersect(c("LeftCount","LeftDuration","RightCount","RightDuration",
+                              "H2O_Count","H2O_Duration","EtOH_Count","EtOH_Duration",
+                              "Total_Count","Total_Duration"),
+                            names(time_sub))
+      summed           <- colSums(time_sub[, sum_cols], na.rm = TRUE)
+      trim_row         <- time_sub[1, ]
+      trim_row[, sum_cols] <- summed
+      trim_row$Bin_Time    <- "60 min"
+      temp_list[[a]]       <- trim_row
+      a <- a + 1
+    }
+    date_list[[y]] <- do.call("rbind", temp_list)
+  }
+  processed_list[[x]] <- do.call("rbind", date_list)
+}
+
+for (x in seq_along(processed_list)) {
+  proc_df  <- processed_list[[x]]
+  samp_num <- proc_df$Sample[1]
+  out_file <- file.path(out_dir, "binned_files",
+                        paste0("Sample_", samp_num, "_binned_values_spf.txt"))
+  if (!file.exists(out_file)) {
+    write.table(proc_df, file = out_file, row.names = FALSE, quote = FALSE, sep = "\t")
+    cat("Written:", out_file, "\n")
+  }
+}
+
+binned_dataset <- as.data.frame(do.call("rbind", processed_list))
+binned_dataset$Age        <- as.factor(as.character(binned_dataset$Age))
+binned_dataset$Sex        <- as.factor(as.character(binned_dataset$Sex))
+binned_dataset$FluidGroup <- as.factor(as.character(binned_dataset$FluidGroup))
+setwd(main_dir)
+```
+
+---
+
+# Shared circadian plot utilities
+
+```{r plot_utils}
+age_colors <- c("3"  = "#3E067D",
+                "6"  = "#F70065",
+                "18" = "#277f80")
+
+age_labels <- c("3" = "3 wk", "6" = "6 wk", "18" = "18 wk")
+
+shared_x_noon <- scale_x_continuous(
+  breaks = seq(0, 1440, by = 120),
+  labels = c("10:00","12:00","14:00","16:00","18:00","20:00","22:00",
+             "00:00","02:00","04:00","06:00","08:00","09:59"),
+  name   = NULL)
+
+shared_theme_circ <- theme_minimal() +
+    theme(
+      axis.text.x  = element_text(angle = 45, hjust = 1, face = "bold", size = 12),
+      axis.text.y  = element_text(face = "bold", size = 12),
+      axis.title.x = element_text(face = "bold", size = 14),
+      axis.title.y = element_text(face = "bold", size = 14, vjust = 3),
+      plot.title   = element_text(face = "bold", size = 16),
+      legend.title = element_text(face = "bold", size = 14),
+      legend.text  = element_text(face = "bold", size = 12),
+      strip.text   = element_text(face = "bold", size = 14),
+      text         = element_text(size = 10),
+      panel.spacing = unit(0.3, "lines"))
+
+dark_rect_noon <- annotate("rect", xmin = -Inf, xmax = 720,
+                           ymin = -Inf, ymax = Inf,
+                           fill = "#939193", alpha = 0.2)
+```
+
+---
+
+# Circadian plots
+
+## EtOH group
+
+```{r circ_etoh_group, fig.width=14, fig.height=6, results='asis'}
+
+make_circ_plot <- function(sum_df, measure_col, ylab_text,
+                           title_str, y_max = 200) {
+  sum_df$Age <- factor(sum_df$Age, levels = c("3","6","18"))
+  se_df      <- sum_df[!is.na(sum_df$se), ]
+
+  p <- ggplot(sum_df, aes(x = Time_Number, y = Mean,
+                          fill = Age, color = Age)) +
+    dark_rect_noon +
+    geom_bar(stat = "identity", alpha = 0.7) +
+    geom_errorbar(data = se_df,
+                  aes(ymin = Mean - se, ymax = Mean + se),
+                  width = 0.5, color = "black", linewidth = 0.3) +
+    geom_smooth(se = FALSE, linewidth = 0.8, color = "black") +
+    scale_fill_manual(values = age_colors, labels = age_labels, name = "Age") +
+    scale_color_manual(values = age_colors, labels = age_labels, name = "Age") +
+    facet_wrap(~ Age, nrow = 1, labeller = labeller(Age = age_labels)) +
+    shared_x_noon + shared_theme_circ +
+    ylab(ylab_text) + ggtitle(title_str) +
+    coord_cartesian(ylim = c(0, y_max))
+  p
+}
+
+etoh_binned <- binned_dataset[binned_dataset$FluidGroup == "EtOH" &
+                                binned_dataset$Bin_Time  == "60 min", ]
+
+for (sex_val in c("Female", "Male")) {
+
+  sub_sex <- etoh_binned[etoh_binned$Sex == sex_val, ]
+
+  for (measure in c("EtOH_Count", "H2O_Count", "Total_Count")) {
+
+    tab_label <- switch(measure,
+                        EtOH_Count  = "EtOH consumption",
+                        H2O_Count   = "H2O consumption",
+                        Total_Count = "Total consumption")
+
+    pa <- aggregate(as.formula(paste(measure, "~ Sample + Time_Number + Age")),
+                    data = sub_sex, FUN = mean, na.rm = TRUE)
+    sm <- summarySE(pa, measurevar = measure,
+                    groupvars = c("Time_Number", "Age"), na.rm = TRUE)
+    names(sm)[names(sm) == "mean"] <- "Mean"
+
+    y_max <- if (measure == "Total_Count") 300 else 200
+
+    p <- make_circ_plot(
+      sum_df      = sm,
+      measure_col = measure,
+      ylab_text   = paste("Mean", gsub("_", " ", measure), "/ 60 min"),
+      title_str   = paste(tab_label, "—", sex_val, "— EtOH group"),
+      y_max       = y_max
+    )
+    print(p)
+
+    ggsave(
+      filename = file.path(out_dir, "figures",
+                           paste0("Circ_EtOH_", sex_val, "_", measure, ".pdf")),
+      plot = p, width = 14, height = 5, units = "in"
+    )
+  }
+}
+```
+
+## H2O group
+
+```{r circ_h2o_group, fig.width=14, fig.height=6, results='asis'}
+
+h2o_binned <- binned_dataset[binned_dataset$FluidGroup == "H2O" &
+                               binned_dataset$Bin_Time  == "60 min", ]
+
+for (sex_val in c("Female", "Male")) {
+  sub_sex <- h2o_binned[h2o_binned$Sex == sex_val, ]
+
+  pa <- aggregate(H2O_Count ~ Sample + Time_Number + Age,
+                  data = sub_sex, FUN = mean, na.rm = TRUE)
+  sm <- summarySE(pa, measurevar = "H2O_Count",
+                  groupvars = c("Time_Number", "Age"), na.rm = TRUE)
+  names(sm)[names(sm) == "mean"] <- "Mean"
+  p <- make_circ_plot(
+    sum_df      = sm,
+    measure_col = "H2O_Count",
+    ylab_text   = "Mean H2O Counts / 60 min",
+    title_str   = paste("H2O consumption —", sex_val, "— H2O group"),
+    y_max       = 350
+  )
+  print(p)
+
+  ggsave(
+    filename = file.path(out_dir, "figures",
+                         paste0("Circ_H2O_", sex_val, "_H2O_Count.pdf")),
+    plot = p, width = 14, height = 5, units = "in"
+  )
+}
+```
+
+---
+
+# Per-animal QC plots
+
+```{r qc_plots, results='hide'}
+setwd(file.path(out_dir, "binned_files"))
+one_min_bin_files <- list.files(pattern = "_1min_bins_spf\\.txt$")
+
+pdf(file = file.path(out_dir, "figures", "QC_one_min_bin_plots.pdf"),
+    height = 8.5, width = 14)
+
+for (x in seq_along(one_min_bin_files)) {
+  day_df <- read.delim(one_min_bin_files[x], stringsAsFactors = FALSE)
+  day_df$ExpDay <- factor(day_df$ExpDay,
+                          levels = unique(sort(day_df$ExpDay)))
+
+  max_y <- max(c(day_df$EtOH_Count, day_df$H2O_Count), na.rm = TRUE)
+
+  p_etoh <- ggplot(day_df, aes(x = Time_Number, y = EtOH_Count, fill = ExpDay)) +
+    annotate("rect", xmin = -Inf, xmax = 720, ymin = -Inf, ymax = Inf,
+             fill = "darkgrey", alpha = 0.1) +
+    geom_bar(stat = "identity") + theme_bw() + shared_x_noon +
+    ggtitle(paste("Sample", unique(day_df$Sample), "— EtOH")) +
+    ylab("EtOH Counts") + ylim(0, max_y) +
+    facet_grid(ExpDay ~ ., scales = "fixed") +
+    theme(legend.position = "none",
+          axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1))
+
+  p_h2o <- ggplot(day_df, aes(x = Time_Number, y = H2O_Count, fill = ExpDay)) +
+    annotate("rect", xmin = -Inf, xmax = 720, ymin = -Inf, ymax = Inf,
+             fill = "darkgrey", alpha = 0.1) +
+    geom_bar(stat = "identity") + theme_bw() + shared_x_noon +
+    ggtitle(paste("Sample", unique(day_df$Sample), "— H2O")) +
+    ylab("H2O Counts") + ylim(0, max_y) +
+    facet_grid(ExpDay ~ ., scales = "fixed") +
+    theme(legend.position = "none",
+          axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1))
+
+  print(p_etoh + p_h2o)
+}
+dev.off()
+setwd(main_dir)
+```
+
+---
+
+# Cosinor modelling
+
+Interested in determining and comparing across age/sex/fluid group:
+  - Acrophase (approx. peak of rhythm)
+  - Amplitude (magnitude of rhythm)
+  - MESOR (mean value)
+
+## Fit model
+
+```{r cosinor_fit}
+tn_to_clock <- function(tn) {
+  total_min <- as.integer(tn %% 1440)
+  total_min_from_midnight <- as.integer((10L * 60L + total_min) %% 1440L)
+  h    <- total_min_from_midnight %/% 60L
+  m    <- total_min_from_midnight %%  60L
+  ampm <- ifelse(h < 12L, "AM", "PM")
+  h12  <- ifelse(h %% 12L == 0L, 12L, h %% 12L)
+  paste0(h12, ":", formatC(m, width = 2, flag = "0"), " ", ampm)
+}
+
+fit_cosinor <- function(time_vec, count_vec) {
+  df <- data.frame(x = time_vec, y = count_vec)
+  df <- df[!is.na(df$y) & !is.na(df$x), ]
+  if (nrow(df) < 6) return(NULL)
+  w       <- 2 * pi / 1440
+  df$cosx <- cos(w * df$x)
+  df$sinx <- sin(w * df$x)
+  fit <- tryCatch(lm(y ~ cosx + sinx, data = df), error = function(e) NULL)
+  if (is.null(fit)) return(NULL)
+  cf    <- coef(fit)
+  beta  <- cf["cosx"]; gamma <- cf["sinx"]
+  amp   <- sqrt(beta^2 + gamma^2)
+
+  t_seq  <- seq(0, 1439, by = 1)
+  fitted <- unname(cf["(Intercept)"]) + beta * cos(w * t_seq) + gamma * sin(w * t_seq)
+  phi_tn <- t_seq[which.max(fitted)]
+
+  data.frame(
+    MESOR           = unname(cf["(Intercept)"]),
+    Amplitude       = unname(amp),
+    Acrophase       = phi_tn,
+    Acrophase_Clock = tn_to_clock(phi_tn),
+    R2              = summary(fit)$r.squared
+  )
+}
+
+bin60 <- binned_dataset[binned_dataset$Bin_Time == "60 min", ]
+
+cosinor_measures <- list(
+  EtOH = c("EtOH_Count", "H2O_Count", "Total_Count"),
+  H2O  = c("Total_Count")
+)
+
+cosinor_list <- list()
+
+for (fg in c("EtOH", "H2O")) {
+  bin_fg <- bin60[bin60$FluidGroup == fg, ]
+  for (var in cosinor_measures[[fg]]) {
+    pa <- aggregate(as.formula(paste(var, "~ Sample + Sex + Age + Time_Number")),
+                    data = bin_fg, FUN = mean, na.rm = TRUE)
+    for (s in unique(pa$Sample)) {
+      sub <- pa[pa$Sample == s, ]
+      res <- fit_cosinor(sub$Time_Number, sub[[var]])
+      if (!is.null(res)) {
+        res$Sample     <- s
+        res$Sex        <- sub$Sex[1]
+        res$Age        <- sub$Age[1]
+        res$FluidGroup <- fg
+        res$Measure    <- var
+        cosinor_list[[paste(fg, var, s)]] <- res
+      }
+    }
+  }
+}
+
+cosinor_df     <- as.data.frame(do.call("rbind", cosinor_list))
+cosinor_df$Age <- factor(cosinor_df$Age, levels = c("3","6","18"))
+cosinor_df$Sex <- factor(cosinor_df$Sex, levels = c("Female","Male"))
+
+write.csv(cosinor_df,
+          file = file.path(out_dir, "results", "Cosinor_PerAnimal.csv"),
+          row.names = FALSE, quote = FALSE)
+
+print(cosinor_df[, c("Sample","Sex","Age","FluidGroup","Measure",
+                      "MESOR","Amplitude","Acrophase","Acrophase_Clock","R2")])
+```
+
+
+## Plot
+
+```{r cosinor_plots, fig.width=14, fig.height=5, results='asis'}
+
+make_cosinor_panel <- function(df, param, y_label, title_str) {
+  df$Age <- factor(df$Age, levels = c("3","6","18"))
+  y_max  <- switch(param, Acrophase = 500, Amplitude = 150, MESOR = 200)
+  sm <- aggregate(as.formula(paste(param, "~ Age + Sex")),
+                  data = df, FUN = mean, na.rm = TRUE)
+  se <- aggregate(as.formula(paste(param, "~ Age + Sex")),
+                  data = df,
+                  FUN = function(x) sd(x, na.rm=TRUE) / sqrt(sum(!is.na(x))))
+  names(sm)[names(sm) == param] <- "Mean"
+  names(se)[names(se) == param] <- "SE"
+  sm <- merge(sm, se, by = c("Age","Sex"))
+  ggplot(sm, aes(x = Age, y = Mean, fill = Age)) +
+    geom_bar(stat = "identity", width = 0.6, linewidth = 0.7,
+             color = "black", alpha = 0.7) +
+    geom_errorbar(aes(ymin = Mean - SE, ymax = Mean + SE),
+                  width = 0.15, linewidth = 0.7, color = "black") +
+    geom_jitter(data = df, aes(x = Age, y = .data[[param]], fill = Age),
+                shape = 21, size = 2, width = 0.1,
+                stroke = 0.7, color = "black", alpha = 0.7) +
+    scale_fill_manual(values = age_colors, labels = age_labels, name = "Age") +
+    scale_x_discrete(labels = age_labels) +
+    coord_cartesian(ylim = c(0, y_max)) +
+    facet_wrap(~ Sex) +
+    ylab(y_label) + xlab("Age") + ggtitle(title_str) +
+    theme_minimal() +
+    theme(
+      axis.text.x  = element_text(angle = 45, hjust = 1, face = "bold", size = 12),
+      axis.text.y  = element_text(face = "bold", size = 12),
+      axis.title.x = element_text(face = "bold", size = 14),
+      axis.title.y = element_text(face = "bold", size = 14, vjust = 3),
+      plot.title   = element_text(face = "bold", size = 16),
+      legend.position = "none",
+      strip.text   = element_text(face = "bold", size = 14),
+      text         = element_text(size = 10),
+      panel.spacing = unit(0.3, "lines"))
+}
+
+for (fg in c("EtOH","H2O")) {
+  cos_fg <- cosinor_df[cosinor_df$FluidGroup == fg, ]
+  for (var in cosinor_measures[[fg]]) {
+    cos_m  <- cos_fg[cos_fg$Measure == var, ]
+    p_acro <- make_cosinor_panel(cos_m, "Acrophase", "Acrophase (min from 10AM)",
+                                  paste("Peak Time —", var, "—", fg))
+    p_amp  <- make_cosinor_panel(cos_m, "Amplitude",  "Amplitude (counts/60min)",
+                                  paste("Amplitude —", var, "—", fg))
+    p_mes  <- make_cosinor_panel(cos_m, "MESOR",      "MESOR (counts/60min)",
+                                  paste("MESOR —", var, "—", fg))
+    print(p_acro | p_amp | p_mes)
+    ggsave(filename = file.path(out_dir, "figures",
+                                paste0("Cosinor_", fg, "_", var, ".pdf")),
+           plot = p_acro | p_amp | p_mes, width = 14, height = 5, units = "in")
+  }
+}
+```
+
+## Stats
+
+```{r cosinor_stats, results='asis'}
+cosinor_stat_rows <- list()
+for (fg in c("EtOH", "H2O")) {
+  cos_fg <- cosinor_df[cosinor_df$FluidGroup == fg, ]
+  for (var in cosinor_measures[[fg]]) {
+    cos_m <- cos_fg[cos_fg$Measure == var, ]
+    for (param in c("Acrophase", "Amplitude", "MESOR")) {
+      cos_m$DV  <- cos_m[[param]]
+      cos_m$Age <- factor(cos_m$Age, levels = c("3","6","18"))
+      cos_m$Sex <- factor(cos_m$Sex, levels = c("Female","Male"))
+      cell_n <- cos_m %>%
+        group_by(Age, Sex) %>%
+        summarise(n = n_distinct(Sample), .groups = "drop")
+
+      res <- tryCatch(
+        aov(DV ~ Age * Sex, data = cos_m),
+        error = function(e) { cat("ERROR:", conditionMessage(e), "\n"); NULL }
+      )
+      if (!is.null(res)) {
+        s   <- summary(res)
+        tbl <- as.data.frame(s[[1]])
+        tbl$Effect     <- rownames(tbl)
+        tbl$FluidGroup <- fg
+        tbl$Measure    <- var
+        tbl$Parameter  <- param
+        names(tbl)     <- make.names(names(tbl))
+        if ("Pr..F." %in% names(tbl)) tbl$p.value <- tbl[["Pr..F."]]
+        tbl$sig <- ifelse(tbl$p.value < 0.001, "***",
+                   ifelse(tbl$p.value < 0.01,  "**",
+                   ifelse(tbl$p.value < 0.05,  "*",
+                   ifelse(tbl$p.value < 0.1,   ".", ""))))
+        cosinor_stat_rows[[paste(fg, var, param)]] <- tbl
+      }
+    }  
+  }   
+}     
+
+if (length(cosinor_stat_rows) > 0) {
+  tidy_cos <- do.call("rbind", lapply(cosinor_stat_rows, function(tbl) {
+    tbl  <- as.data.frame(tbl)
+    core <- c("FluidGroup","Measure","Parameter","Effect",
+              "Df","Sum.Sq","Mean.Sq","F.value","p.value","sig")
+    tbl[, intersect(core, names(tbl)), drop = FALSE]
+  }))
+  tidy_cos[sapply(tidy_cos, is.numeric)] <-
+    lapply(tidy_cos[sapply(tidy_cos, is.numeric)],
+           function(x) round(as.numeric(x), 4))
+  write.csv(tidy_cos,
+            file      = file.path(out_dir, "results", "Cosinor_Stats_Summary.csv"),
+            row.names = FALSE, quote = FALSE)
+}
+```
+
+There were significant Age x Sex interactions for acrophase for EtOH, EtOH Total, & H2O.
+Perform Tukey post-hoc analyses:
+
+```{r cosinor_tukey_etoh, results='asis'}
+
+tukey_rows_etoh <- list()
+
+for (var in c("EtOH_Count", "H2O_Count", "Total_Count")) {
+  cos_m <- cosinor_df[cosinor_df$FluidGroup == "EtOH" &
+                        cosinor_df$Measure    == var, ]
+  cos_m$Age <- factor(cos_m$Age, levels = c("3","6","18"))
+  cos_m$Sex <- factor(cos_m$Sex, levels = c("Female","Male"))
+
+  res <- tryCatch(
+    aov(Acrophase ~ Age * Sex, data = cos_m),
+    error = function(e) { cat("ERROR:", conditionMessage(e), "\n"); NULL }
+  )
+
+  if (!is.null(res)) {
+    tukey <- TukeyHSD(res, which = "Age:Sex")
+    tbl             <- as.data.frame(tukey$`Age:Sex`)
+    tbl$Comparison  <- rownames(tbl)
+    tbl$Measure     <- var
+    tbl$FluidGroup  <- "EtOH"
+    names(tbl)[1:4] <- c("Difference","Lower_CI","Upper_CI","p.adj")
+    tbl$sig <- ifelse(tbl$p.adj < 0.001, "***",
+               ifelse(tbl$p.adj < 0.01,  "**",
+               ifelse(tbl$p.adj < 0.05,  "*",
+               ifelse(tbl$p.adj < 0.1,   ".", ""))))
+    tbl <- tbl[order(tbl$p.adj), ]
+    tbl[, c("Difference","Lower_CI","Upper_CI","p.adj")] <-
+      lapply(tbl[, c("Difference","Lower_CI","Upper_CI","p.adj")],
+             function(x) round(x, 4))
+    tukey_rows_etoh[[var]] <- tbl
+  }
+}
+
+if (length(tukey_rows_etoh) > 0) {
+  tukey_etoh_df <- do.call("rbind", tukey_rows_etoh)
+  write.csv(tukey_etoh_df,
+            file      = file.path(out_dir, "results",
+                                  "Tukey_Acrophase_AgeSex_EtOHgroup.csv"),
+            row.names = FALSE, quote = FALSE)
+}
+```
+
+```{r cosinor_tukey_h2o, results='asis'}
+
+cos_m <- cosinor_df[cosinor_df$FluidGroup == "H2O" &
+                      cosinor_df$Measure    == "Total_Count", ]
+cos_m$Age <- factor(cos_m$Age, levels = c("3","6","18"))
+cos_m$Sex <- factor(cos_m$Sex, levels = c("Female","Male"))
+
+res <- tryCatch(
+  aov(Acrophase ~ Age * Sex, data = cos_m),
+  error = function(e) { cat("ERROR:", conditionMessage(e), "\n"); NULL }
+)
+
+if (!is.null(res)) {
+  tukey <- TukeyHSD(res, which = "Age:Sex")
+  tbl             <- as.data.frame(tukey$`Age:Sex`)
+  tbl$Comparison  <- rownames(tbl)
+  tbl$Measure     <- "Total_Count"
+  tbl$FluidGroup  <- "H2O"
+  names(tbl)[1:4] <- c("Difference","Lower_CI","Upper_CI","p.adj")
+  tbl$sig <- ifelse(tbl$p.adj < 0.001, "***",
+             ifelse(tbl$p.adj < 0.01,  "**",
+             ifelse(tbl$p.adj < 0.05,  "*",
+             ifelse(tbl$p.adj < 0.1,   ".", ""))))
+  tbl <- tbl[order(tbl$p.adj), ]
+  tbl[, c("Difference","Lower_CI","Upper_CI","p.adj")] <-
+    lapply(tbl[, c("Difference","Lower_CI","Upper_CI","p.adj")],
+           function(x) round(x, 4))
+
+  write.csv(tbl,
+            file      = file.path(out_dir, "results",
+                                  "Tukey_Acrophase_AgeSex_H2Ogroup.csv"),
+            row.names = FALSE, quote = FALSE)
+}
+```
+
+---
+
+# Directly compare Cosinor for total fluid across fluid groups
+
+```{r cosinor_fluid_compare_plot}
+
+cos_total <- cosinor_df[cosinor_df$Measure == "Total_Count", ]
+cos_total$Age        <- factor(cos_total$Age,        levels = c("3","6","18"))
+cos_total$Sex        <- factor(cos_total$Sex,        levels = c("Female","Male"))
+cos_total$FluidGroup <- factor(cos_total$FluidGroup, levels = c("H2O","EtOH"))
+
+fluid_alpha <- c("EtOH" = 0.9, "H2O" = 0.4)
+
+make_fluid_comparison_panel <- function(df, param, y_label, title_str) {
+
+  y_max <- switch(param,
+                  Acrophase = 500,
+                  Amplitude = 150,
+                  MESOR     = 200)
+
+  sm <- aggregate(as.formula(paste(param, "~ Age + Sex + FluidGroup")),
+                  data = df, FUN = mean, na.rm = TRUE)
+  se <- aggregate(as.formula(paste(param, "~ Age + Sex + FluidGroup")),
+                  data = df,
+                  FUN = function(x) sd(x, na.rm=TRUE) / sqrt(sum(!is.na(x))))
+  names(sm)[names(sm) == param] <- "Mean"
+  names(se)[names(se) == param] <- "SE"
+  sm <- merge(sm, se, by = c("Age","Sex","FluidGroup"))
+
+  ggplot(sm, aes(x = Age, y = Mean, fill = Age, group = FluidGroup)) +
+    geom_bar(aes(alpha = FluidGroup), stat = "identity", width = 0.6,
+             linewidth = 0.7, color = "black",
+             position = position_dodge(width = 0.7)) +
+    geom_jitter(data = df,
+                aes(x = Age, y = .data[[param]], fill = Age,
+                    alpha = FluidGroup),
+                shape = 21, size = 2, stroke = 0.7, color = "black",
+                position = position_jitterdodge(jitter.width = 0.1,
+                                                dodge.width  = 0.7)) +
+    geom_errorbar(aes(ymin = Mean - SE, ymax = Mean + SE),
+                  width = 0.15, linewidth = 0.7, color = "black",
+                  position = position_dodge(width = 0.7)) +
+    scale_fill_manual(values = age_colors, labels = age_labels, name = "Age") +
+    scale_alpha_manual(values = fluid_alpha, name = "Fluid group") +
+    scale_x_discrete(labels = age_labels) +
+    coord_cartesian(ylim = c(0, y_max)) +
+    facet_wrap(~ Sex) +
+    ylab(y_label) + xlab("Age") + ggtitle(title_str) +
+    theme_minimal() +
+    theme(
+      axis.text.x  = element_text(angle = 45, hjust = 1, face = "bold", size = 12),
+      axis.text.y  = element_text(face = "bold", size = 12),
+      axis.title.x = element_text(face = "bold", size = 14),
+      axis.title.y = element_text(face = "bold", size = 14, vjust = 3),
+      plot.title   = element_text(face = "bold", size = 16),
+      legend.position = "none",
+      strip.text   = element_text(face = "bold", size = 14),
+      text         = element_text(size = 10),
+      panel.spacing = unit(0.3, "lines"))
+}
+
+p_acro <- make_fluid_comparison_panel(cos_total, "Acrophase",
+                                       "Acrophase (min from 10AM)",
+                                       "Peak Time — Total Consumption")
+p_amp  <- make_fluid_comparison_panel(cos_total, "Amplitude",
+                                       "Amplitude (counts/60min)",
+                                       "Amplitude — Total Consumption")
+p_mes  <- make_fluid_comparison_panel(cos_total, "MESOR",
+                                       "MESOR (counts/60min)",
+                                       "MESOR — Total Consumption")
+
+print(p_acro | p_amp | p_mes)
+
+ggsave(
+  filename = file.path(out_dir, "figures", "Cosinor_FluidComparison_Total.pdf"),
+  plot     = p_acro | p_amp | p_mes,
+  width    = 16, height = 5, units = "in"
+)
+```
+
+```{r cosinor_fluid_compare_stats}
+
+fluid_stat_rows <- list()
+
+for (sex_val in c("Female", "Male")) {
+  cos_sex <- cos_total[cos_total$Sex == sex_val, ]
+
+  for (param in c("Acrophase", "Amplitude", "MESOR")) {
+    cos_sex$DV <- cos_sex[[param]]
+
+    cell_n <- cos_sex %>%
+      group_by(Age, FluidGroup) %>%
+      summarise(n = n_distinct(Sample), .groups = "drop")
+
+    if (any(cell_n$n < 2)) {
+      cat("WARNING: cell(s) with < 2 animals — ANOVA skipped.\n\n")
+      next
+    }
+
+    res <- tryCatch(
+      aov(DV ~ Age * FluidGroup, data = cos_sex),
+      error = function(e) { cat("ERROR:", conditionMessage(e), "\n"); NULL }
+    )
+
+    if (!is.null(res)) {
+      s   <- summary(res)
+      tbl <- as.data.frame(s[[1]])
+      tbl$Effect    <- rownames(tbl)
+      tbl$Parameter <- param
+      tbl$Sex       <- sex_val
+      names(tbl)    <- make.names(names(tbl))
+      if ("Pr..F." %in% names(tbl)) tbl$p.value <- tbl[["Pr..F."]]
+      tbl$sig <- ifelse(tbl$p.value < 0.001, "***",
+                 ifelse(tbl$p.value < 0.01,  "**",
+                 ifelse(tbl$p.value < 0.05,  "*",
+                 ifelse(tbl$p.value < 0.1,   ".", ""))))
+      fluid_stat_rows[[paste(sex_val, param)]] <- tbl
+    }
+  }
+}
+
+if (length(fluid_stat_rows) > 0) {
+  tidy_fluid <- do.call("rbind", lapply(fluid_stat_rows, function(tbl) {
+    tbl <- as.data.frame(tbl)
+    core <- c("Sex","Parameter","Effect","Df","Sum.Sq","Mean.Sq","F.value","p.value","sig")
+    tbl[, intersect(core, names(tbl)), drop = FALSE]
+  }))
+  tidy_fluid[sapply(tidy_fluid, is.numeric)] <-
+    lapply(tidy_fluid[sapply(tidy_fluid, is.numeric)],
+           function(x) round(as.numeric(x), 4))
+  write.csv(tidy_fluid,
+            file      = file.path(out_dir, "results",
+                                  "Cosinor_FluidComparison_Stats.csv"),
+            row.names = FALSE, quote = FALSE)
+}
+```
+
+---
+
+# Circadian overlay plots with acrophase markers
+
+```{r circ_overlay, fig.width=8, fig.height=5, results='asis'}
+make_circ_overlay <- function(sum_df, measure_col, ylab_text,
+                              title_str, y_max = 200,
+                              acro_df = NULL,
+                              cosinor_params = NULL) {
+  sum_df$Age <- factor(sum_df$Age, levels = c("3","6","18"))
+
+  p <- ggplot(sum_df, aes(x = Time_Number, y = Mean, color = Age)) +
+    annotate("rect", xmin = -Inf, xmax = 720,
+             ymin = -Inf, ymax = Inf,
+             fill = "#939193", alpha = 0.2) +
+    scale_color_manual(values = age_colors, labels = age_labels, name = "Age") +
+    shared_x_noon + shared_theme_circ +
+    ylab(ylab_text) + ggtitle(title_str) +
+    coord_cartesian(ylim = c(0, y_max)) +
+    theme(legend.position = "right")
+
+  if (!is.null(cosinor_params)) {
+    cosinor_params$Age <- factor(cosinor_params$Age, levels = c("3","6","18"))
+    w     <- 2 * pi / 1440
+    t_seq <- seq(0, 1439, by = 1)
+    curve_list <- lapply(1:nrow(cosinor_params), function(i) {
+      row <- cosinor_params[i, ]
+      data.frame(
+        Time_Number = t_seq,
+        Mean        = row$MESOR + row$Amplitude * cos(w * t_seq - w * row$Acrophase),
+        Age         = row$Age
+      )
+    })
+    curve_df     <- do.call("rbind", curve_list)
+    curve_df$Age <- factor(curve_df$Age, levels = c("3","6","18"))
+    p <- p + geom_line(data        = curve_df,
+                       aes(x       = Time_Number,
+                           y       = Mean,
+                           color   = Age),
+                       linewidth   = 1.2,
+                       inherit.aes = FALSE)
+  }
+
+  if (!is.null(acro_df)) {
+    acro_df$Age <- factor(acro_df$Age, levels = c("3","6","18"))
+    p <- p +
+      geom_jitter(data        = acro_df,
+                 aes(x       = Acrophase,
+                     y       = y_max * 0.95,
+                     color   = Age),
+                 shape       = 6,
+                 size        = 3,
+                 stroke      = 1,
+                 position = position_jitter(height = 2, width = 2),
+                 inherit.aes = FALSE)
+  }
+  p
+}
+
+etoh_binned <- binned_dataset[binned_dataset$FluidGroup == "EtOH" &
+                                binned_dataset$Bin_Time  == "60 min", ]
+
+for (sex_val in c("Female", "Male")) {
+  sub_sex <- etoh_binned[etoh_binned$Sex == sex_val, ]
+
+  for (measure in c("EtOH_Count", "H2O_Count", "Total_Count")) {
+    tab_label <- switch(measure,
+                        EtOH_Count  = "EtOH consumption",
+                        H2O_Count   = "H2O consumption",
+                        Total_Count = "Total consumption")
+
+    pa <- aggregate(as.formula(paste(measure, "~ Sample + Time_Number + Age")),
+                    data = sub_sex, FUN = mean, na.rm = TRUE)
+    sm <- summarySE(pa, measurevar = measure,
+                    groupvars = c("Time_Number", "Age"), na.rm = TRUE)
+    names(sm)[names(sm) == "mean"] <- "Mean"
+    y_max <- 250
+
+    acro_sub   <- cosinor_df[cosinor_df$FluidGroup == "EtOH" &
+                               cosinor_df$Measure    == measure &
+                               cosinor_df$Sex        == sex_val, ]
+    acro_means <- aggregate(cbind(Acrophase, Amplitude, MESOR) ~ Age,
+                            data = acro_sub, FUN = mean, na.rm = TRUE)
+
+    p_overlay <- make_circ_overlay(
+      sum_df         = sm,
+      measure_col    = measure,
+      ylab_text      = paste("Mean", gsub("_", " ", measure), "/ 60 min"),
+      title_str      = paste(tab_label, "—", sex_val, "— EtOH group"),
+      y_max          = y_max,
+      acro_df        = acro_means,
+      cosinor_params = acro_means
+    )
+    print(p_overlay)
+    ggsave(
+      filename = file.path(out_dir, "figures",
+                           paste0("Circ_EtOH_overlay_", sex_val, "_", measure, ".pdf")),
+      plot = p_overlay, width = 8, height = 5, units = "in"
+    )
+  }
+}
+
+h2o_binned <- binned_dataset[binned_dataset$FluidGroup == "H2O" &
+                               binned_dataset$Bin_Time  == "60 min", ]
+
+for (sex_val in c("Female", "Male")) {
+  sub_sex <- h2o_binned[h2o_binned$Sex == sex_val, ]
+
+  pa <- aggregate(Total_Count ~ Sample + Time_Number + Age,
+                  data = sub_sex, FUN = mean, na.rm = TRUE)
+  sm <- summarySE(pa, measurevar = "Total_Count",
+                  groupvars = c("Time_Number", "Age"), na.rm = TRUE)
+  names(sm)[names(sm) == "mean"] <- "Mean"
+
+  acro_sub   <- cosinor_df[cosinor_df$FluidGroup == "H2O" &
+                             cosinor_df$Measure    == "Total_Count" &
+                             cosinor_df$Sex        == sex_val, ]
+  acro_means <- aggregate(cbind(Acrophase, Amplitude, MESOR) ~ Age,
+                          data = acro_sub, FUN = mean, na.rm = TRUE)
+
+  p_overlay <- make_circ_overlay(
+    sum_df         = sm,
+    measure_col    = "Total_Count",
+    ylab_text      = "Mean Total Counts / 60 min",
+    title_str      = paste("Total consumption —", sex_val, "— H2O group"),
+    y_max          = 250,
+    acro_df        = acro_means,
+    cosinor_params = acro_means
+  )
+  print(p_overlay)
+  ggsave(
+    filename = file.path(out_dir, "figures",
+                         paste0("Circ_H2O_overlay_", sex_val, "_Total_Count.pdf")),
+    plot = p_overlay, width = 8, height = 5, units = "in"
+  )
+}
+```
+
+---
