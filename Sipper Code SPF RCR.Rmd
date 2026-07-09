@@ -19,15 +19,6 @@ This is selected by changing the line(s) below "SET THE WORKING DIRECTORY" (Line
   ##e.g., "Day 1 EtOH Left 12 022624"
 
 ```{r}
-################################################################################
-#PURPOSE:Analyze data from mouse sipper results
-#
-#AUTHOR: SEAN P. FARRIS
-#
-#DATE:11/09/2021
-#UPDATED THE CODE TO CORRECT A BUG IN GREPPING THE PROPER SAMPLES
-################################################################################
-
 options(stringsAsFactors = F, warn=-1)
 
 ################################################################################
