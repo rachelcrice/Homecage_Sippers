@@ -1,0 +1,1309 @@
+---
+title: "2BC Analysis and Correlations"
+author: "Rachel C Rice"
+date: "2026-06-17"
+output: html_document
+---
+
+# Load necessary libraries and read in & wrangle data
+```{r}
+library(tidyr)
+library(dplyr)
+library(ggplot2)
+library(lmerTest)
+library(emmeans)
+library(ggpubr)
+
+df_2BC <- read.csv(file.path(getwd(), "all_data_manual_vs_counts.csv"))
+
+#Ensure Sex, Group, Age, and Day are factors
+df_2BC$Sex <- factor(df_2BC$Sex, levels = c("F", "M"))
+df_2BC$Group <- factor(df_2BC$Group, levels = c("H2O", "EtOH"))
+df_2BC$Age <- factor(df_2BC$Age, levels = c("3 wk", "6 wk", "18 wk"))
+df_2BC$Day <- factor(df_2BC$Day, levels = c("1", "2", "3", "4", "5", "6", 
+                                            "7","8", "9", "10", "11", "12", 
+                                            "13", "14"))
+
+EtOH_data <- df_2BC[df_2BC$Group == "EtOH", ]
+
+H2O_data <- df_2BC[df_2BC$Group == "H2O", ]
+
+side_pref_df <- read.csv(file.path(getwd(), "H2O_group_side_pref.csv"))
+side_pref_df$Sex <- factor(side_pref_df$Sex, levels = c("F", "M"))
+side_pref_df$Age <- factor(side_pref_df$Age, levels = c("3 wk", "6 wk", "18 wk"))
+side_pref_df$Day <- factor(side_pref_df$Day, levels = c("1", "2", "3", "4", "5", "6", 
+                                            "7","8", "9", "10", "11", "12", 
+                                            "13", "14"))
+
+EtOH_pref_df <- read.csv(file.path(getwd(), "EtOH_pref.csv"))
+EtOH_pref_df$Sex <- factor(EtOH_pref_df$Sex, levels = c("F", "M"))
+EtOH_pref_df$Age <- factor(EtOH_pref_df$Age, levels = c("3 wk", "6 wk", "18 wk"))
+EtOH_pref_df$Day <- factor(EtOH_pref_df$Day, levels = c("1", "2", "3", "4", "5", "6", 
+                                            "7","8", "9", "10", "11", "12", 
+                                            "13", "14"))
+
+```
+
+# EtOH group daily & total EtOH consumption
+
+Examining factors of age and sex
+```{r}
+
+# Daily linegraph & Stats 
+#-------------------------------------------------------------------------------
+
+EtOH_gkg_summary <- EtOH_data %>%
+  group_by(Sex, Age, Day) %>%
+  summarise(
+    avg_gkg = mean(EtOH_gkg, na.rm = TRUE),
+    sem_gkg = sd(EtOH_gkg, na.rm = TRUE) / sqrt(n()),
+    .groups = "drop")
+
+# Compute mean and SEM per day, by genotype and exposure
+ggplot(EtOH_gkg_summary, aes(x = Day, y = avg_gkg, group = Age,
+                             color = Age)) +
+  facet_wrap(~Sex, labeller = labeller(Sex = c("F" = "Females", "M" = "Males"))) +
+  geom_line(linewidth = 0.7) +
+  geom_point(size = 3, stroke = 1) +
+  geom_errorbar(aes(ymin = avg_gkg - sem_gkg, 
+                    ymax = avg_gkg + sem_gkg, color = Age),
+                width = 0.2, linewidth = 0.7) +
+  scale_color_manual(values = c(
+    "3 wk" = "#3E067D" ,
+    "6 wk" = "#F70065",
+    "18 wk" = "#277f80"
+  )) +
+  scale_shape_manual(values = c(1, 2, 1, 2)) +
+  labs(title = "Average Daily EtOH Consumption (g/kg)",
+       x = "Day",
+       y = "Average g/kg EtOH",
+       color = "Age") +
+  ylim(c(0,20)) +
+  theme_minimal() +
+  theme(axis.text.x = element_text(face = "bold", angle = 45, 
+                                   hjust = 1, size = 12),
+        axis.text.y = element_text(face = "bold", size = 12),
+        axis.title.x = element_text(face = "bold", size = 14),
+        axis.title.y = element_text(face = "bold", size = 14, vjust = 3),
+        plot.title = element_text(face = "bold", size = 16),
+        legend.title = element_text(face = "bold", size = 14),
+        legend.text = element_text(face = "bold", size = 12),
+        strip.text = element_text(face = "bold", size = 14))
+
+ggsave(file.path(getwd(), "plots", "Daily gkg EtOH.png"), 
+       width = 10, height = 4, units = "in", dpi = 600, bg = "white")
+
+model_daily <- lmer(EtOH_gkg ~ Age * Sex * Day + (1|ID), data = EtOH_data)
+anova(model_daily)
+# Significant main effects of Sex & Day.
+
+#--------------------------------
+
+# Total EtOH Consumed
+#--------------------------------
+
+total_EtOH_df <- EtOH_data %>%
+  group_by(ID, Sex, Age) %>%
+  summarise(total_EtOH_gkg = sum(EtOH_gkg), .groups = "drop")
+
+total_EtOH_df_summary <- total_EtOH_df %>%
+  group_by(Sex, Age) %>%
+  summarise(
+    avg_tot_EtOH = mean(total_EtOH_gkg, na.rm = TRUE),
+    sem_tot_EtOH = sd(total_EtOH_gkg, na.rm = TRUE) / sqrt(n()),
+    .groups = "drop"
+  )
+
+
+ggplot() +
+  facet_wrap(~Sex, labeller = labeller(Sex = c("F" = "Females", "M" = "Males"))) +
+  geom_bar(data = total_EtOH_df_summary, 
+           aes(x = Age, y = avg_tot_EtOH, fill = Age), 
+           stat = "identity", position = position_dodge(width = 0.9), 
+           linewidth = 0.7, alpha = 0.7, color = "black") +
+  geom_errorbar(
+    data = total_EtOH_df_summary,
+    aes(x = Age, ymin = avg_tot_EtOH - sem_tot_EtOH, 
+        ymax = avg_tot_EtOH + sem_tot_EtOH),
+    position = position_dodge(width = 0.9), 
+    width = 0.15, 
+    linewidth = 0.7
+  ) +
+  
+  geom_point(
+    data = total_EtOH_df, 
+    aes(x = Age, y = total_EtOH_gkg, fill = Age),  
+    position = position_jitterdodge(jitter.width = 0.1, dodge.width = 0.9),
+    shape = 21,
+    color = "black",
+    size = 2,
+    alpha = 0.7,
+    stroke = 0.7
+  ) +
+
+  scale_fill_manual(values = c(
+    "3 wk" = "#3E067D" ,
+    "6 wk" = "#F70065",
+    "18 wk" = "#277f80"
+  )) +
+
+  labs(title = "Cumulative g/kg EtOH",
+       x = "",
+       y = "Cumulative g/kg EtOH",
+       fill = "Group") +
+  ylim(c(0,300)) +
+  theme_minimal() +
+  theme(legend.position = "none",
+    axis.text.x = element_text(face = "bold", angle = 45, 
+                                   hjust = 1, size = 14),
+        axis.text.y = element_text(face = "bold", size = 12),
+        axis.title.x = element_text(face = "bold", size = 14),
+        axis.title.y = element_text(face = "bold", size = 14, vjust = 3),
+        plot.title = element_text(face = "bold", size = 16),
+        strip.text = element_text(face = "bold", size = 14))
+
+ggsave(file.path(getwd(), "plots", "Total gkg EtOH.png"), 
+       width = 8, height = 5, units = "in", dpi = 600, bg = "white")
+
+
+
+model_total <- aov(total_EtOH_gkg ~ Age * Sex, data = total_EtOH_df)
+summary(model_total)
+# Main effect of Sex
+
+
+#--------------------------------
+
+#-------------------------------------------------------------------------------
+
+#-------------------------------------------------------------------------------
+
+```
+
+# EtOH Group Total g/kg Fluid
+```{r}
+
+# Daily linegraph & Stats 
+#-------------------------------------------------------------------------------
+
+EtOH_fluid_gkg_summary <- EtOH_data %>%
+  group_by(Sex, Age, Day) %>%
+  summarise(
+    avg_gkg = mean(Total_gkg, na.rm = TRUE),
+    sem_gkg = sd(Total_gkg, na.rm = TRUE) / sqrt(n()),
+    .groups = "drop")
+
+# Compute mean and SEM per day, by genotype and exposure
+ggplot(EtOH_fluid_gkg_summary, aes(x = Day, y = avg_gkg, group = Age,
+                             color = Age)) +
+  facet_wrap(~Sex, labeller = labeller(Sex = c("F" = "Females", "M" = "Males"))) +
+  geom_line(linewidth = 0.7) +
+  geom_point(size = 3, stroke = 1) +
+  geom_errorbar(aes(ymin = avg_gkg - sem_gkg, 
+                    ymax = avg_gkg + sem_gkg, color = Age),
+                width = 0.2, linewidth = 0.7) +
+  scale_color_manual(values = c(
+    "3 wk" = "#3E067D" ,
+    "6 wk" = "#F70065",
+    "18 wk" = "#277f80"
+  )) +
+  scale_shape_manual(values = c(1, 2, 1, 2)) +
+  labs(title = "EtOH Group Average Daily Total Fluid Consumption (g/kg)",
+       x = "Day",
+       y = "Average g/kg Total Fluid (EtOH + H2O)",
+       color = "Age") +
+  ylim(c(0,400)) +
+  theme_minimal() +
+  theme(axis.text.x = element_text(face = "bold", angle = 45, 
+                                   hjust = 1, size = 12),
+        axis.text.y = element_text(face = "bold", size = 12),
+        axis.title.x = element_text(face = "bold", size = 14),
+        axis.title.y = element_text(face = "bold", size = 14, vjust = 3),
+        plot.title = element_text(face = "bold", size = 16),
+        legend.title = element_text(face = "bold", size = 14),
+        legend.text = element_text(face = "bold", size = 12),
+        strip.text = element_text(face = "bold", size = 14))
+
+ggsave(file.path(getwd(), "plots", "Daily gkg Total Fluid EtOH Group.png"), 
+       width = 10, height = 4, units = "in", dpi = 600, bg = "white")
+
+model_daily <- lmer(Total_gkg ~ Age * Sex * Day + (1|ID), data = EtOH_data)
+anova(model_daily)
+# Significant main effects of Sex & Day, 
+# Age almost sig, 
+# Age x Sex Interaction
+# Sex x Day Interaction
+
+# Examine Age x Sex interaction
+emm_age_sex <- emmeans(model_daily, ~ Sex * Age)
+
+# Same day across sexes (F vs M at each day)
+sex_by_age <- contrast(emm_age_sex, 
+                       method = "pairwise", 
+                       by = "Age")
+summary(sex_by_age, adjust = "tukey")
+
+# Sexes were different for 3 wk and 6 wk age groups
+
+# Within each sex, each day vs Day 1 (baseline)
+
+emm_day_sex <- emmeans(model_daily, ~ Sex * Day)
+baseline_contrasts <- contrast(emm_day_sex,
+                               method = "trt.vs.ctrl",
+                               ref = 1,        # Day 1 as baseline
+                               by = "Sex")
+summary(baseline_contrasts, adjust = "tukey")
+
+# Females were different from baseline on days 4, 6, and 9.
+
+# Males were different from baseline on day 8. 
+
+#--------------------------------
+
+# Total Fluid Consumed
+#--------------------------------
+
+total_fluid_EtOH_df <- EtOH_data %>%
+  group_by(ID, Sex, Age) %>%
+  summarise(total_gkg = sum(Total_gkg), .groups = "drop")
+
+total_EtOH_df_summary <- total_fluid_EtOH_df %>%
+  group_by(Age, Sex) %>%
+  summarise(
+    avg_tot_EtOH = mean(total_gkg, na.rm = TRUE),
+    sem_tot_EtOH = sd(total_gkg, na.rm = TRUE) / sqrt(n()),
+    .groups = "drop"
+  )
+
+
+ggplot() +
+  geom_bar(data = total_EtOH_df_summary, 
+           aes(x = Age, y = avg_tot_EtOH, fill = Age), 
+           stat = "identity", position = position_dodge(width = 0.9), 
+           linewidth = 0.7, alpha = 0.7, color = "black") +
+  facet_wrap(~Sex, labeller = labeller(Sex = c("F" = "Females", "M" = "Males"))) +
+  geom_errorbar(
+    data = total_EtOH_df_summary,
+    aes(x = Age, ymin = avg_tot_EtOH - sem_tot_EtOH, 
+        ymax = avg_tot_EtOH + sem_tot_EtOH),
+    position = position_dodge(width = 0.9), 
+    width = 0.15, 
+    linewidth = 0.7
+  ) +
+  
+  geom_point(
+    data = total_fluid_EtOH_df, 
+    aes(x = Age, y = total_gkg, fill = Age),  
+    position = position_jitterdodge(jitter.width = 0.1, dodge.width = 0.9),
+    shape = 21,
+    color = "black",
+    size = 2,
+    alpha = 0.7,
+    stroke = 0.7
+  ) +
+
+  scale_fill_manual(values = c(
+    "3 wk" = "#3E067D" ,
+    "6 wk" = "#F70065",
+    "18 wk" = "#277f80"
+  )) +
+
+  labs(title = "Cumulative g/kg Fluid (EtOH Group)",
+       x = "",
+       y = "Cumulative g/kg Total Fluid (EtOH + H2O)",
+       fill = "Group") +
+  theme_minimal() +
+  theme(legend.position = "none",
+    axis.text.x = element_text(face = "bold", angle = 45, 
+                                   hjust = 1, size = 14),
+        axis.text.y = element_text(face = "bold", size = 12),
+        axis.title.x = element_text(face = "bold", size = 14),
+        axis.title.y = element_text(face = "bold", size = 14, vjust = 3),
+        plot.title = element_text(face = "bold", size = 16),
+        strip.text = element_text(face = "bold", size = 14))
+
+ggsave(file.path(getwd(), "plots", "Total gkg Fluid EtOH Group.png"), 
+       width = 8, height = 5, units = "in", dpi = 600, bg = "white")
+
+
+model_total <- aov(total_gkg ~ Age * Sex, data = total_fluid_EtOH_df)
+summary(model_total)
+
+# Main effect of Sex, Age almost sig, Age x Sex Interaction effect.
+
+# Examine Age x Sex interaction
+emm_age_sex <- emmeans(model_total, ~ Sex * Age)
+
+sex_by_age <- contrast(emm_age_sex, 
+                       method = "pairwise", 
+                       by = "Age")
+summary(sex_by_age, adjust = "tukey")
+
+age_by_sex <- contrast(emm_age_sex, 
+                       method = "pairwise", 
+                       by = "Sex")
+summary(age_by_sex, adjust = "tukey")
+
+# Males and females were different for 3 wk and 6 wk age groups.
+
+```
+
+# EtOH Preference
+```{r}
+# Daily linegraph & Stats 
+#-------------------------------------------------------------------------------
+
+EtOH_pref_summary <- EtOH_pref_df %>%
+  group_by(Sex, Age, Day) %>%
+  summarise(
+    avg_pref = mean(EtOH_Pref, na.rm = TRUE),
+    sem_pref = sd(EtOH_Pref, na.rm = TRUE) / sqrt(n()),
+    .groups = "drop")
+
+# Compute mean and SEM per day, by genotype and exposure
+ggplot(EtOH_pref_summary, aes(x = Day, y = avg_pref, group = Age,
+                             color = Age)) +
+  geom_hline(aes(yintercept = 0.5), linetype = "dashed", color = "#02d6d6",
+             linewidth = 1) +
+  facet_wrap(~Sex, labeller = labeller(Sex = c("F" = "Females", "M" = "Males"))) +
+  geom_line(linewidth = 0.7) +
+  geom_point(size = 3, stroke = 1) +
+  geom_errorbar(aes(ymin = avg_pref - sem_pref, 
+                    ymax = avg_pref + sem_pref, color = Age),
+                width = 0.2, linewidth = 0.7) +
+  scale_color_manual(values = c(
+    "3 wk" = "#3E067D" ,
+    "6 wk" = "#F70065",
+    "18 wk" = "#277f80"
+  )) +
+  scale_shape_manual(values = c(1, 2, 1, 2)) +
+  labs(title = "Average Daily EtOH Preference",
+       x = "Day",
+       y = "Average EtOH Preference",
+       color = "Age") +
+  ylim(c(0,1)) +
+  theme_minimal() +
+  theme(axis.text.x = element_text(face = "bold", angle = 45, 
+                                   hjust = 1, size = 12),
+        axis.text.y = element_text(face = "bold", size = 12),
+        axis.title.x = element_text(face = "bold", size = 14),
+        axis.title.y = element_text(face = "bold", size = 14, vjust = 3),
+        plot.title = element_text(face = "bold", size = 16),
+        legend.title = element_text(face = "bold", size = 14),
+        legend.text = element_text(face = "bold", size = 12),
+        strip.text = element_text(face = "bold", size = 14))
+
+ggsave(file.path(getwd(), "plots", "Daily Pref EtOH.png"), 
+       width = 10, height = 4, units = "in", dpi = 600, bg = "white")
+
+model_daily <- lmer(EtOH_Pref ~ Age * Sex * Day + (1|ID), data = EtOH_pref_df)
+anova(model_daily)
+# No significant effects..
+
+#--------------------------------
+
+# Average Preference
+#--------------------------------
+
+avg_pref_df <- EtOH_pref_df %>%
+  group_by(ID, Sex, Age) %>%
+  summarise(avg_EtOH_pref = mean(EtOH_Pref), .groups = "drop")
+
+avg_EtOH_pref_summary <- avg_pref_df %>%
+  group_by(Age, Sex) %>%
+  summarise(
+    avg_pref_EtOH = mean(avg_EtOH_pref, na.rm = TRUE),
+    sem_pref_EtOH = sd(avg_EtOH_pref, na.rm = TRUE) / sqrt(n()),
+    .groups = "drop"
+  )
+
+
+ggplot() +
+  geom_hline(yintercept = 0.5, linetype = "dashed", color = "#02d6d6",
+             linewidth = 1) +
+  geom_bar(data = avg_EtOH_pref_summary, 
+           aes(x = Age, y = avg_pref_EtOH, fill = Age), 
+           stat = "identity", position = position_dodge(width = 0.9), 
+           linewidth = 0.7, alpha = 0.7, color = "black") +
+  facet_wrap(~Sex, labeller = labeller(Sex = c("F" = "Females", "M" = "Males"))) +
+  geom_errorbar(
+    data = avg_EtOH_pref_summary,
+    aes(x = Age, ymin = avg_pref_EtOH - sem_pref_EtOH, 
+        ymax = avg_pref_EtOH + sem_pref_EtOH),
+    position = position_dodge(width = 0.9), 
+    width = 0.15, 
+    linewidth = 0.7
+  ) +
+  
+  geom_point(
+    data = avg_pref_df, 
+    aes(x = Age, y = avg_EtOH_pref, fill = Age),  
+    position = position_jitterdodge(jitter.width = 0.1, dodge.width = 0.9),
+    shape = 21,
+    color = "black",
+    size = 2,
+    alpha = 0.7,
+    stroke = 0.7
+  ) +
+
+  scale_fill_manual(values = c(
+    "3 wk" = "#3E067D" ,
+    "6 wk" = "#F70065",
+    "18 wk" = "#277f80"
+  )) +
+
+  labs(title = "Average EtOH Preference",
+       x = "",
+       y = "Average EtOH Preference",
+       fill = "Group") +
+  ylim(c(0,1)) +
+  theme_minimal() +
+  theme(legend.position = "none",
+    axis.text.x = element_text(face = "bold", angle = 45, 
+                                   hjust = 1, size = 14),
+        axis.text.y = element_text(face = "bold", size = 12),
+        axis.title.x = element_text(face = "bold", size = 14),
+        axis.title.y = element_text(face = "bold", size = 14, vjust = 3),
+        plot.title = element_text(face = "bold", size = 16),
+        strip.text = element_text(face = "bold", size = 14))
+
+ggsave(file.path(getwd(), "plots", "Avg EtOH Pref.png"), 
+       width = 8, height = 5, units = "in", dpi = 600, bg = "white")
+
+
+model_avg_pref <- aov(avg_EtOH_pref ~ Age * Sex, data = avg_pref_df)
+summary(model_total)
+# Main effect of Sex, Age p = 0.057, Age x Sex interaction effect
+
+emm_age_sex <- emmeans(model_avg_pref, ~ Sex * Age)
+
+sex_by_age <- contrast(emm_age_sex, 
+                       method = "pairwise", 
+                       by = "Age")
+summary(sex_by_age, adjust = "tukey")
+# No effects.
+
+age_by_sex <- contrast(emm_age_sex, 
+                       method = "pairwise", 
+                       by = "Sex")
+summary(age_by_sex, adjust = "tukey")
+
+#--------------------------------
+
+#-------------------------------------------------------------------------------
+
+#-------------------------------------------------------------------------------
+
+```
+
+# Correlation Plots of Week 1 versus Week 2 Consumption
+
+Show, within sexes, consumption was stable across weeks. 
+
+```{r}
+week_corr_df <- EtOH_data %>%
+  mutate(Week = ifelse(Day %in% 1:7, "Week 1", "Week 2")) %>%
+  group_by(ID, Sex, Age, Week) %>%
+  summarise(avg_gkg = mean(EtOH_gkg, na.rm = TRUE), .groups = "drop") %>%
+  pivot_wider(names_from = Week, values_from = avg_gkg)
+
+week_corr_plot <- ggplot(week_corr_df, aes(x = `Week 1`, y = `Week 2`)) +
+  geom_point(
+    aes(fill = Age),
+    shape = 21,
+    color = "black",
+    size = 2,
+    alpha = 0.7,
+    stroke = 0.7
+  ) +
+  geom_smooth(method = "lm", color = "black") +
+  stat_cor(method = "pearson", aes(size = 4, fontface = "bold"),
+           r.digits = 2, p.digits = 2) +
+  facet_wrap(~Sex, labeller = labeller(Sex = c("F" = "Females", "M" = "Males"))) +
+  scale_fill_manual(values = c("3 wk" = "#3E067D",
+                               "6 wk" = "#F70065",
+                               "18 wk" = "#277f80")) +
+  labs(title = "Week 1 vs Week 2 EtOH Consumption",
+       x = "Week 1 Avg EtOH Consumption (g/kg/day)",
+       y = "Week 2 Avg EtOH Consumption (g/kg/day)",
+       fill = "Age") +
+  theme_minimal() +
+  theme(
+    axis.text.x  = element_text(face = "bold", size = 12),
+    axis.text.y  = element_text(face = "bold", size = 12),
+    axis.title.x = element_text(face = "bold", size = 14),
+    axis.title.y = element_text(face = "bold", size = 14, vjust = 3),
+    plot.title   = element_text(face = "bold", size = 16),
+    legend.title = element_text(face = "bold", size = 14),
+    legend.text  = element_text(face = "bold", size = 12),
+    strip.text   = element_text(face = "bold", size = 14)
+  )
+
+ggsave(file.path(getwd(), "plots", "Week1 vs Week2 EtOH.png"),
+       width = 10, height = 5, units = "in", dpi = 600, bg = "white")
+
+
+```
+
+# Correlating g/kg EtOH vs Sipper Counts
+
+```{r}
+
+EtOH_sipper_corr <- ggplot(EtOH_data, aes(x = EtOH_Counts, y = EtOH_gkg, fill = Age)) +
+  geom_point(shape = 21, color = "black", size = 2, alpha = 0.7, stroke = 0.7) +
+  geom_smooth(method = "lm", color = "black", fill = "grey80") +
+  stat_cor(aes(x = EtOH_Counts, y = EtOH_gkg, color = Age),
+         method = "pearson", size = 4, fontface = "bold", 
+         r.digits = 2, p.digits = 2) +
+  facet_wrap(~Sex, labeller = labeller(Sex = c("F" = "Females", "M" = "Males"))) +
+  scale_fill_manual(values = c("3 wk" = "#3E067D",
+                               "6 wk" = "#F70065",
+                               "18 wk" = "#277f80")) +
+  scale_color_manual(values = c("3 wk" = "#3E067D",
+                               "6 wk" = "#F70065",
+                               "18 wk" = "#277f80")) +
+  labs(x = "Counts", y = "g/kg EtOH", fill = "Age") +
+  guides(color = "none") +
+  theme_minimal() +
+  theme(
+    axis.text.x  = element_text(face = "bold", size = 12),
+    axis.text.y  = element_text(face = "bold", size = 12),
+    axis.title.x = element_text(face = "bold", size = 14),
+    axis.title.y = element_text(face = "bold", size = 14, vjust = 3),
+    legend.title = element_text(face = "bold", size = 14),
+    legend.text  = element_text(face = "bold", size = 12),
+    strip.text   = element_text(face = "bold", size = 14)
+  )
+
+ggsave(file.path(getwd(), "plots", "EtOH Sipper vs Manual.png"),
+       width = 10, height = 5, units = "in", dpi = 600, bg = "white")
+
+
+```
+
+# EtOH group daily & total EtOH consumption
+
+Examining factors of age and sex
+```{r}
+
+# Daily linegraph & Stats 
+#-------------------------------------------------------------------------------
+
+EtOH_gkg_summary <- EtOH_data %>%
+  group_by(Sex, Age, Day) %>%
+  summarise(
+    avg_gkg = mean(EtOH_gkg, na.rm = TRUE),
+    sem_gkg = sd(EtOH_gkg, na.rm = TRUE) / sqrt(n()),
+    .groups = "drop")
+
+# Compute mean and SEM per day, by genotype and exposure
+ggplot(EtOH_gkg_summary, aes(x = Day, y = avg_gkg, group = Age,
+                             color = Age)) +
+  facet_wrap(~Sex, labeller = labeller(Sex = c("F" = "Females", "M" = "Males"))) +
+  geom_line(linewidth = 0.7) +
+  geom_point(size = 3, stroke = 1) +
+  geom_errorbar(aes(ymin = avg_gkg - sem_gkg, 
+                    ymax = avg_gkg + sem_gkg, color = Age),
+                width = 0.2, linewidth = 0.7) +
+  scale_color_manual(values = c(
+    "3 wk" = "#3E067D" ,
+    "6 wk" = "#F70065",
+    "18 wk" = "#277f80"
+  )) +
+  scale_shape_manual(values = c(1, 2, 1, 2)) +
+  labs(title = "Average Daily EtOH Consumption (g/kg)",
+       x = "Day",
+       y = "Average g/kg",
+       color = "Age") +
+  ylim(c(0,20)) +
+  theme_minimal() +
+  theme(axis.text.x = element_text(face = "bold", angle = 45, 
+                                   hjust = 1, size = 12),
+        axis.text.y = element_text(face = "bold", size = 12),
+        axis.title.x = element_text(face = "bold", size = 14),
+        axis.title.y = element_text(face = "bold", size = 14, vjust = 3),
+        plot.title = element_text(face = "bold", size = 16),
+        legend.title = element_text(face = "bold", size = 14),
+        legend.text = element_text(face = "bold", size = 12),
+        strip.text = element_text(face = "bold", size = 14))
+
+ggsave(file.path(getwd(), "plots", "Daily gkg EtOH.png"), 
+       width = 10, height = 4, units = "in", dpi = 600, bg = "white")
+
+model_daily <- lmer(EtOH_gkg ~ Age * Sex * Day + (1|ID), data = EtOH_data)
+anova(model_daily)
+# Significant main effects of Sex & Day.
+
+#--------------------------------
+
+# Total EtOH Consumed
+#--------------------------------
+
+total_EtOH_df <- EtOH_data %>%
+  group_by(ID, Sex, Age) %>%
+  summarise(total_EtOH_gkg = sum(EtOH_gkg), .groups = "drop")
+
+total_EtOH_df_summary <- total_EtOH_df %>%
+  group_by(Age) %>%
+  summarise(
+    avg_tot_EtOH = mean(total_EtOH_gkg, na.rm = TRUE),
+    sem_tot_EtOH = sd(total_EtOH_gkg, na.rm = TRUE) / sqrt(n()),
+    .groups = "drop"
+  )
+
+
+ggplot() +
+  geom_bar(data = total_EtOH_df_summary, 
+           aes(x = Age, y = avg_tot_EtOH, fill = Age), 
+           stat = "identity", position = position_dodge(width = 0.9), 
+           linewidth = 0.7, alpha = 0.7, color = "black") +
+  facet_wrap(~Sex, labeller = labeller(Sex = c("F" = "Females", "M" = "Males"))) +
+  geom_errorbar(
+    data = total_EtOH_df_summary,
+    aes(x = Age, ymin = avg_tot_EtOH - sem_tot_EtOH, 
+        ymax = avg_tot_EtOH + sem_tot_EtOH),
+    position = position_dodge(width = 0.9), 
+    width = 0.15, 
+    linewidth = 0.7
+  ) +
+  
+  geom_point(
+    data = total_EtOH_df, 
+    aes(x = Age, y = total_EtOH_gkg, fill = Age),  
+    position = position_jitterdodge(jitter.width = 0.1, dodge.width = 0.9),
+    shape = 21,
+    color = "black",
+    size = 2,
+    alpha = 0.7,
+    stroke = 0.7
+  ) +
+
+  scale_fill_manual(values = c(
+    "3 wk" = "#3E067D" ,
+    "6 wk" = "#F70065",
+    "18 wk" = "#277f80"
+  )) +
+
+  labs(title = "Cumulative g/kg EtOH",
+       x = "",
+       y = "Cumulative g/kg EtOH",
+       fill = "Group") +
+  ylim(c(0,300)) +
+  theme_minimal() +
+  theme(legend.position = "none",
+    axis.text.x = element_text(face = "bold", angle = 45, 
+                                   hjust = 1, size = 14),
+        axis.text.y = element_text(face = "bold", size = 12),
+        axis.title.x = element_text(face = "bold", size = 14),
+        axis.title.y = element_text(face = "bold", size = 14, vjust = 3),
+        plot.title = element_text(face = "bold", size = 16),
+        strip.text = element_text(face = "bold", size = 14))
+
+ggsave(file.path(getwd(), "plots", "Total gkg EtOH.png"), 
+       width = 8, height = 5, units = "in", dpi = 600, bg = "white")
+
+
+total_EtOH_df <- EtOH_data %>%
+  group_by(ID, Sex, Age) %>%
+  summarise(total_EtOH_gkg = sum(EtOH_gkg, na.rm = TRUE), .groups = "drop")
+
+model_total <- aov(total_EtOH_gkg ~ Age * Sex, data = total_EtOH_df)
+summary(model_total)
+# Main effect of Sex
+
+
+#--------------------------------
+
+#-------------------------------------------------------------------------------
+
+#-------------------------------------------------------------------------------
+
+```
+
+# Correlation Plots of Week 1 versus Week 2 Consumption
+
+Show, within sexes, consumption was stable across weeks. 
+
+```{r}
+week_corr_df <- EtOH_data %>%
+  mutate(Week = ifelse(Day %in% 1:7, "Week 1", "Week 2")) %>%
+  group_by(ID, Sex, Age, Week) %>%
+  summarise(avg_gkg = mean(EtOH_gkg, na.rm = TRUE), .groups = "drop") %>%
+  pivot_wider(names_from = Week, values_from = avg_gkg)
+
+week_corr_plot <- ggplot(week_corr_df, aes(x = `Week 1`, y = `Week 2`)) +
+  geom_point(
+    aes(fill = Age),
+    shape = 21,
+    color = "black",
+    size = 2,
+    alpha = 0.7,
+    stroke = 0.7
+  ) +
+  geom_smooth(method = "lm", color = "black") +
+  stat_cor(method = "pearson", aes(size = 4, fontface = "bold"),
+           r.digits = 2, p.digits = 2) +
+  facet_wrap(~Sex, labeller = labeller(Sex = c("F" = "Females", "M" = "Males"))) +
+  scale_fill_manual(values = c("3 wk" = "#3E067D",
+                               "6 wk" = "#F70065",
+                               "18 wk" = "#277f80")) +
+  labs(title = "Week 1 vs Week 2 EtOH Consumption",
+       x = "Week 1 Avg EtOH Consumption (g/kg/day)",
+       y = "Week 2 Avg EtOH Consumption (g/kg/day)",
+       fill = "Age") +
+  theme_minimal() +
+  theme(
+    axis.text.x  = element_text(face = "bold", size = 12),
+    axis.text.y  = element_text(face = "bold", size = 12),
+    axis.title.x = element_text(face = "bold", size = 14),
+    axis.title.y = element_text(face = "bold", size = 14, vjust = 3),
+    plot.title   = element_text(face = "bold", size = 16),
+    legend.title = element_text(face = "bold", size = 14),
+    legend.text  = element_text(face = "bold", size = 12),
+    strip.text   = element_text(face = "bold", size = 14)
+  )
+
+ggsave(file.path(getwd(), "plots", "Week1 vs Week2 EtOH.png"),
+       width = 10, height = 5, units = "in", dpi = 600, bg = "white")
+
+
+```
+
+# Correlating g/kg EtOH vs Sipper Counts
+
+```{r}
+
+EtOH_sipper_corr <- ggplot(EtOH_data, aes(x = EtOH_Counts, y = EtOH_gkg, fill = Age)) +
+  geom_point(shape = 21, color = "black", size = 2, alpha = 0.7, stroke = 0.7) +
+  geom_smooth(method = "lm", color = "black", fill = "grey80") +
+  stat_cor(inherit.aes = FALSE, aes(x = EtOH_Counts, y = EtOH_gkg),
+         method = "pearson", size = 4, fontface = "bold", 
+         r.digits = 2, p.digits = 2) +
+  facet_wrap(~Sex, labeller = labeller(Sex = c("F" = "Females", "M" = "Males"))) +
+  scale_fill_manual(values = c("3 wk" = "#3E067D",
+                               "6 wk" = "#F70065",
+                               "18 wk" = "#277f80")) +
+  labs(x = "Counts", y = "g/kg EtOH", fill = "Age") +
+  guides(color = "none") +
+  ylim(0,25) +
+  theme_minimal() +
+  theme(
+    axis.text.x  = element_text(face = "bold", size = 12),
+    axis.text.y  = element_text(face = "bold", size = 12),
+    axis.title.x = element_text(face = "bold", size = 14),
+    axis.title.y = element_text(face = "bold", size = 14, vjust = 3),
+    legend.title = element_text(face = "bold", size = 14),
+    legend.text  = element_text(face = "bold", size = 12),
+    strip.text   = element_text(face = "bold", size = 14)
+  )
+
+ggsave(file.path(getwd(), "plots", "EtOH Sipper vs Manual.png"),
+       width = 10, height = 5, units = "in", dpi = 600, bg = "white")
+
+# Split by Age 
+#-------------------------------------------------------------------------------
+
+EtOH_sipper_corr_age <- ggplot(EtOH_data, aes(x = EtOH_Counts, y = EtOH_gkg, fill = Age)) +
+  geom_point(shape = 21, color = "black", size = 2, alpha = 0.7, stroke = 0.7) +
+  geom_smooth(method = "lm", color = "black", fill = "grey80") +
+  stat_cor(inherit.aes = FALSE, aes(x = EtOH_Counts, y = EtOH_gkg),
+         method = "pearson", size = 4, fontface = "bold", 
+         r.digits = 2, p.digits = 2) +
+  facet_wrap(~Sex+Age, 
+             labeller = labeller(Sex = c("F" = "Females", "M" = "Males"))) +
+  scale_fill_manual(values = c("3 wk" = "#3E067D",
+                               "6 wk" = "#F70065",
+                               "18 wk" = "#277f80")) +
+  labs(x = "Counts", y = "g/kg EtOH", fill = "Age") +
+  guides(color = "none") +
+  ylim(0,25) +
+  theme_minimal() +
+  theme(
+    axis.text.x  = element_text(face = "bold", size = 12),
+    axis.text.y  = element_text(face = "bold", size = 12),
+    axis.title.x = element_text(face = "bold", size = 14),
+    axis.title.y = element_text(face = "bold", size = 14, vjust = 3),
+    legend.title = element_text(face = "bold", size = 14),
+    legend.text  = element_text(face = "bold", size = 12),
+    strip.text   = element_text(face = "bold", size = 14)
+  )
+
+ggsave(file.path(getwd(), "plots", "EtOH Sipper vs Manual by Age.png"),
+       width = 10, height = 7, units = "in", dpi = 600, bg = "white")
+
+```
+
+
+# Correlating total g/kg fluid vs total counts for EtOH group
+```{r}
+
+total_sipper_corr <- ggplot(EtOH_data, aes(x = Total_Counts, y = Total_gkg, fill = Age)) +
+  geom_point(shape = 21, color = "black", size = 2, alpha = 0.7, stroke = 0.7) +
+  geom_smooth(method = "lm", color = "black", fill = "grey80") +
+  stat_cor(inherit.aes = FALSE, aes(x = Total_Counts, y = Total_gkg),
+         method = "pearson", size = 4, fontface = "bold", 
+         r.digits = 2, p.digits = 2) +
+  facet_wrap(~Sex, labeller = labeller(Sex = c("F" = "Females", "M" = "Males"))) +
+  scale_fill_manual(values = c("3 wk" = "#3E067D",
+                               "6 wk" = "#F70065",
+                               "18 wk" = "#277f80")) +
+  labs(x = "Counts", y = "g/kg Total Fluid", fill = "Age") +
+  guides(color = "none") +
+  ylim(0,400) +
+  theme_minimal() +
+  theme(
+    axis.text.x  = element_text(face = "bold", size = 12),
+    axis.text.y  = element_text(face = "bold", size = 12),
+    axis.title.x = element_text(face = "bold", size = 14),
+    axis.title.y = element_text(face = "bold", size = 14, vjust = 3),
+    legend.title = element_text(face = "bold", size = 14),
+    legend.text  = element_text(face = "bold", size = 12),
+    strip.text   = element_text(face = "bold", size = 14)
+  )
+
+ggsave(file.path(getwd(), "plots", "Total Fluid EtOH Sipper vs Manual.png"),
+       width = 10, height = 5, units = "in", dpi = 600, bg = "white")
+
+# Split by Age 
+#-------------------------------------------------------------------------------
+
+total_sipper_corr_age <- ggplot(EtOH_data, aes(x = Total_Counts, y = Total_gkg, fill = Age)) +
+  geom_point(shape = 21, color = "black", size = 2, alpha = 0.7, stroke = 0.7) +
+  geom_smooth(method = "lm", color = "black", fill = "grey80") +
+  stat_cor(inherit.aes = FALSE, aes(x = Total_Counts, y = Total_gkg),
+         method = "pearson", size = 4, fontface = "bold", 
+         r.digits = 2, p.digits = 2) +
+  facet_wrap(~Sex+Age, 
+             labeller = labeller(Sex = c("F" = "Females", "M" = "Males"))) +
+  scale_fill_manual(values = c("3 wk" = "#3E067D",
+                               "6 wk" = "#F70065",
+                               "18 wk" = "#277f80")) +
+  labs(x = "Counts", y = "g/kg Total Fluid", fill = "Age") +
+  guides(color = "none") +
+  ylim(0,400) +
+  theme_minimal() +
+  theme(
+    axis.text.x  = element_text(face = "bold", size = 12),
+    axis.text.y  = element_text(face = "bold", size = 12),
+    axis.title.x = element_text(face = "bold", size = 14),
+    axis.title.y = element_text(face = "bold", size = 14, vjust = 3),
+    legend.title = element_text(face = "bold", size = 14),
+    legend.text  = element_text(face = "bold", size = 12),
+    strip.text   = element_text(face = "bold", size = 14)
+  )
+
+ggsave(file.path(getwd(), "plots", "Total Fluid EtOH Sipper vs Manual by Age.png"),
+       width = 10, height = 7, units = "in", dpi = 600, bg = "white")
+
+
+```
+
+# H2O group daily & total H2O consumption
+
+Examining factors of age and sex
+
+Sum both bottles & counts to reflect entire H2O consumption
+
+```{r}
+# Daily linegraph & Stats 
+#-------------------------------------------------------------------------------
+
+H2O_daily <- H2O_data %>%
+  mutate(
+    total_water_gkg = EtOH_gkg + H2O_gkg,
+    total_water_counts = EtOH_Counts + H2O_Counts
+  )
+
+H2O_gkg_summary <- H2O_daily %>%
+  group_by(Sex, Age, Day) %>%
+  summarise(
+    avg_gkg = mean(total_water_gkg, na.rm = TRUE),
+    sem_gkg = sd(total_water_gkg, na.rm = TRUE) / sqrt(n()),
+    .groups = "drop")
+
+ggplot(H2O_gkg_summary, aes(x = Day, y = avg_gkg, group = Age, color = Age)) +
+  facet_wrap(~Sex, labeller = labeller(Sex = c("F" = "Females", "M" = "Males"))) +
+  geom_line(linewidth = 0.7) +
+  geom_point(size = 3, stroke = 1) +
+  geom_errorbar(aes(ymin = avg_gkg - sem_gkg, 
+                    ymax = avg_gkg + sem_gkg, color = Age),
+                width = 0.2, linewidth = 0.7) +
+  scale_color_manual(values = c(
+    "3 wk" = "#3E067D",
+    "6 wk" = "#F70065",
+    "18 wk" = "#277f80"
+  )) +
+  scale_shape_manual(values = c(1, 2, 1, 2)) +
+  labs(title = "Average Daily H2O Consumption (g/kg)",
+       x = "Day",
+       y = "Average g/kg",
+       color = "Age") +
+  ylim(c(0, 400)) +
+  theme_minimal() +
+  theme(axis.text.x = element_text(face = "bold", angle = 45, 
+                                   hjust = 1, size = 12),
+        axis.text.y = element_text(face = "bold", size = 12),
+        axis.title.x = element_text(face = "bold", size = 14),
+        axis.title.y = element_text(face = "bold", size = 14, vjust = 3),
+        plot.title = element_text(face = "bold", size = 16),
+        legend.title = element_text(face = "bold", size = 14),
+        legend.text = element_text(face = "bold", size = 12),
+        strip.text = element_text(face = "bold", size = 14))
+
+ggsave(file.path(getwd(), "plots", "Daily gkg H2O.png"), 
+       width = 10, height = 4, units = "in", dpi = 600, bg = "white")
+
+model_daily_H2O <- lmer(total_water_gkg ~ Age * Sex * Day + (1|ID), data = H2O_daily)
+anova(model_daily_H2O)
+# Main effects of Age, Sex, Day, and a Sex x Day interaction effect 
+
+# Examine Age x Sex interaction
+emm_day_sex <- emmeans(model_daily_H2O, ~ Sex * Day)
+
+# Same day across sexes (F vs M at each day)
+sex_by_day <- contrast(emm_day_sex, 
+                       method = "pairwise", 
+                       by = "Day")
+summary(sex_by_day, adjust = "tukey")
+
+# Sexes were different days 1-5, 7, and 9-14. 
+
+# Within each sex, each day vs Day 1 (baseline)
+baseline_contrasts <- contrast(emm_day_sex,
+                               method = "trt.vs.ctrl",
+                               ref = 1,        # Day 1 as baseline
+                               by = "Sex")
+summary(baseline_contrasts, adjust = "tukey")
+
+# For females, the following days were different from baseline: 
+# 2***, 5***, 6**, 8***, 11***
+
+# For males, the following days were different from baseline: 
+# 2*, 7**, 12**, 13*
+
+#-------------------------------------------------------------------------------
+
+# Total H2O Consumed
+#-------------------------------------------------------------------------------
+
+total_H2O_df <- H2O_daily %>%
+  group_by(ID, Sex, Age) %>%
+  summarise(total_H2O_gkg = sum(total_water_gkg, na.rm = TRUE), .groups = "drop")
+
+total_H2O_df_summary <- total_H2O_df %>%
+  group_by(Age, Sex) %>%
+  summarise(
+    avg_tot_H2O = mean(total_H2O_gkg, na.rm = TRUE),
+    sem_tot_H2O = sd(total_H2O_gkg, na.rm = TRUE) / sqrt(n()),
+    .groups = "drop"
+  )
+
+ggplot() +
+  geom_bar(data = total_H2O_df_summary, 
+           aes(x = Age, y = avg_tot_H2O, fill = Age), 
+           stat = "identity", position = position_dodge(width = 0.9), 
+           linewidth = 0.7, alpha = 0.7, color = "black") +
+  facet_wrap(~Sex, labeller = labeller(Sex = c("F" = "Females", "M" = "Males"))) +
+  geom_errorbar(
+    data = total_H2O_df_summary,
+    aes(x = Age, ymin = avg_tot_H2O - sem_tot_H2O, 
+        ymax = avg_tot_H2O + sem_tot_H2O),
+    position = position_dodge(width = 0.9), 
+    width = 0.15, 
+    linewidth = 0.7
+  ) +
+  geom_point(
+    data = total_H2O_df, 
+    aes(x = Age, y = total_H2O_gkg, fill = Age),  
+    position = position_jitterdodge(jitter.width = 0.1, dodge.width = 0.9),
+    shape = 21,
+    color = "black",
+    size = 2,
+    alpha = 0.7,
+    stroke = 0.7
+  ) +
+  scale_fill_manual(values = c(
+    "3 wk" = "#3E067D",
+    "6 wk" = "#F70065",
+    "18 wk" = "#277f80"
+  )) +
+  labs(title = "Cumulative g/kg H2O",
+       x = "",
+       y = "Cumulative g/kg H2O",
+       fill = "Group") +
+  ylim(0, 4000) +
+  theme_minimal() +
+  theme(legend.position = "none",
+        axis.text.x = element_text(face = "bold", angle = 45, 
+                                   hjust = 1, size = 14),
+        axis.text.y = element_text(face = "bold", size = 12),
+        axis.title.x = element_text(face = "bold", size = 14),
+        axis.title.y = element_text(face = "bold", size = 14, vjust = 3),
+        plot.title = element_text(face = "bold", size = 16),
+        strip.text = element_text(face = "bold", size = 14))
+
+ggsave(file.path(getwd(), "plots", "Total gkg H2O.png"), 
+       width = 8, height = 5, units = "in", dpi = 600, bg = "white")
+
+model_total_H2O <- aov(total_H2O_gkg ~ Age * Sex, data = total_H2O_df)
+summary(model_total_H2O)
+
+# Main effects of Age and Sex 
+
+```
+
+# Correlation Plots of Week 1 versus Week 2 Consumption
+
+Show, within sexes, consumption was stable across weeks. 
+
+```{r}
+
+week_corr_H2O_df <- H2O_daily %>%
+  mutate(Week = ifelse(Day %in% 1:7, "Week 1", "Week 2")) %>%
+  group_by(ID, Sex, Age, Week) %>%
+  summarise(avg_gkg = mean(total_water_gkg, na.rm = TRUE), .groups = "drop") %>%
+  pivot_wider(names_from = Week, values_from = avg_gkg)
+
+week_corr_H2O_plot <- ggplot(week_corr_H2O_df, aes(x = `Week 1`, y = `Week 2`)) +
+  geom_point(
+    aes(fill = Age),
+    shape = 21,
+    color = "black",
+    size = 2,
+    alpha = 0.7,
+    stroke = 0.7
+  ) +
+  geom_smooth(method = "lm", color = "black") +
+  stat_cor(method = "pearson", size = 4, fontface = "bold",
+           r.digits = 2, p.digits = 2) +
+  facet_wrap(~Sex, labeller = labeller(Sex = c("F" = "Females", "M" = "Males"))) +
+  scale_fill_manual(values = c("3 wk" = "#3E067D",
+                               "6 wk" = "#F70065",
+                               "18 wk" = "#277f80")) +
+  labs(title = "Week 1 vs Week 2 H2O Consumption",
+       x = "Week 1 Avg H2O Consumption (g/kg/day)",
+       y = "Week 2 Avg H2O Consumption (g/kg/day)",
+       fill = "Age") +
+  theme_minimal() +
+  theme(
+    axis.text.x  = element_text(face = "bold", size = 12),
+    axis.text.y  = element_text(face = "bold", size = 12),
+    axis.title.x = element_text(face = "bold", size = 14),
+    axis.title.y = element_text(face = "bold", size = 14, vjust = 3),
+    plot.title   = element_text(face = "bold", size = 16),
+    legend.title = element_text(face = "bold", size = 14),
+    legend.text  = element_text(face = "bold", size = 12),
+    strip.text   = element_text(face = "bold", size = 14)
+  )
+
+ggsave(file.path(getwd(), "plots", "Week1 vs Week2 H2O.png"),
+       width = 10, height = 5, units = "in", dpi = 600, bg = "white")
+
+```
+
+# Correlating g/kg H2O vs Sipper Counts
+
+```{r}
+
+H2O_sipper_corr <- ggplot(H2O_daily, aes(x = total_water_counts, y = total_water_gkg, fill = Age)) +
+  geom_point(shape = 21, color = "black", size = 2, alpha = 0.7, stroke = 0.7) +
+  geom_smooth(method = "lm", color = "black", fill = "grey80") +
+  stat_cor(inherit.aes = FALSE, aes(x = total_water_counts, y = total_water_gkg),
+           method = "pearson", size = 4, fontface = "bold", 
+           r.digits = 2, p.digits = 2, label.y = 400) +
+  facet_wrap(~Sex, labeller = labeller(Sex = c("F" = "Females", "M" = "Males"))) +
+  scale_fill_manual(values = c("3 wk" = "#3E067D",
+                               "6 wk" = "#F70065",
+                               "18 wk" = "#277f80")) +
+  labs(x = "Counts", y = "g/kg H2O", fill = "Age") +
+  guides(color = "none") +
+  ylim(0,400) +
+  theme_minimal() +
+  theme(
+    axis.text.x  = element_text(face = "bold", size = 12),
+    axis.text.y  = element_text(face = "bold", size = 12),
+    axis.title.x = element_text(face = "bold", size = 14),
+    axis.title.y = element_text(face = "bold", size = 14, vjust = 3),
+    legend.title = element_text(face = "bold", size = 14),
+    legend.text  = element_text(face = "bold", size = 12),
+    strip.text   = element_text(face = "bold", size = 14)
+  )
+
+ggsave(file.path(getwd(), "plots", "H2O Sipper vs Manual.png"),
+       width = 10, height = 5, units = "in", dpi = 600, bg = "white")
+
+# Split by Age and Sex
+#-------------------------------------------------------------------------------
+
+H2O_sipper_corr_age <- ggplot(H2O_daily, aes(x = total_water_counts, 
+                                         y = total_water_gkg, 
+                                         fill = Age)) +
+  geom_point(shape = 21, color = "black", size = 2, alpha = 0.7, stroke = 0.7) +
+  geom_smooth(method = "lm", color = "black", fill = "grey80") +
+  stat_cor(inherit.aes = FALSE, aes(x = total_water_counts, y = total_water_gkg),
+           method = "pearson", size = 4, fontface = "bold", 
+           r.digits = 2, p.digits = 2, label.y = 400) +
+  facet_wrap(~Sex+Age, labeller = labeller(Sex = c("F" = "Females", "M" = "Males"))) +
+  scale_fill_manual(values = c("3 wk" = "#3E067D",
+                               "6 wk" = "#F70065",
+                               "18 wk" = "#277f80")) +
+  labs(x = "Counts", y = "g/kg H2O", fill = "Age") +
+  guides(color = "none") +
+  ylim(0,400) +
+  theme_minimal() +
+  theme(
+    axis.text.x  = element_text(face = "bold", size = 12),
+    axis.text.y  = element_text(face = "bold", size = 12),
+    axis.title.x = element_text(face = "bold", size = 14),
+    axis.title.y = element_text(face = "bold", size = 14, vjust = 3),
+    legend.title = element_text(face = "bold", size = 14),
+    legend.text  = element_text(face = "bold", size = 12),
+    strip.text   = element_text(face = "bold", size = 14)
+  )
+
+ggsave(file.path(getwd(), "plots", "H2O Sipper vs Manual by Age.png"),
+       width = 10, height = 7, units = "in", dpi = 600, bg = "white")
+
+
+
+#-------------------------------------------------------------------------------
+
+
+```
+
+# Side preference for H2O Group
+
+```{r}
+
+# Daily linegraph & Stats 
+#-------------------------------------------------------------------------------
+
+side_pref_summary <- side_pref_df %>%
+  group_by(Sex, Age, Day) %>%
+  summarise(
+    avg_pref = mean(R_side_pref, na.rm = TRUE),
+    sem_pref = sd(R_side_pref, na.rm = TRUE) / sqrt(n()),
+    .groups = "drop")
+
+# Compute mean and SEM per day, by genotype and exposure
+ggplot(side_pref_summary, aes(x = Day, y = avg_pref, group = Age,
+                             color = Age)) +
+  geom_hline(aes(yintercept = 0.5), linetype = "dashed", color = "#02d6d6",
+             linewidth = 1) +
+  facet_wrap(~Sex, labeller = labeller(Sex = c("F" = "Females", "M" = "Males"))) +
+  geom_line(linewidth = 0.7) +
+  geom_point(size = 3, stroke = 1) +
+  geom_errorbar(aes(ymin = avg_pref - sem_pref, 
+                    ymax = avg_pref + sem_pref, color = Age),
+                width = 0.2, linewidth = 0.7) +
+  scale_color_manual(values = c(
+    "3 wk" = "#3E067D" ,
+    "6 wk" = "#F70065",
+    "18 wk" = "#277f80"
+  )) +
+  scale_shape_manual(values = c(1, 2, 1, 2)) +
+  labs(title = "Average Daily Side Preference (H2O Group)",
+       x = "Day",
+       y = "Average R Side Preference",
+       color = "Age") +
+  ylim(c(0,1)) +
+  theme_minimal() +
+  theme(axis.text.x = element_text(face = "bold", angle = 45, 
+                                   hjust = 1, size = 12),
+        axis.text.y = element_text(face = "bold", size = 12),
+        axis.title.x = element_text(face = "bold", size = 14),
+        axis.title.y = element_text(face = "bold", size = 14, vjust = 3),
+        plot.title = element_text(face = "bold", size = 16),
+        legend.title = element_text(face = "bold", size = 14),
+        legend.text = element_text(face = "bold", size = 12),
+        strip.text = element_text(face = "bold", size = 14))
+
+ggsave(file.path(getwd(), "plots", "Daily Pref EtOH.png"), 
+       width = 10, height = 4, units = "in", dpi = 600, bg = "white")
+
+model_daily <- lmer(EtOH_Pref ~ Age * Sex * Day + (1|ID), data = EtOH_pref_df)
+anova(model_daily)
+# No significant effects..
+
+#--------------------------------
+
+# Average Preference
+#--------------------------------
+
+avg_pref_df <- side_pref_df %>%
+  group_by(ID, Sex, Age) %>%
+  summarise(avg_pref = mean(R_side_pref), .groups = "drop")
+
+avg_side_pref_summary <- avg_pref_df %>%
+  group_by(Age, Sex) %>%
+  summarise(
+    avg_side_pref = mean(avg_pref, na.rm = TRUE),
+    sem_side_pref = sd(avg_pref, na.rm = TRUE) / sqrt(n()),
+    .groups = "drop"
+  )
+
+
+ggplot() +
+  geom_hline(yintercept = 0.5, linetype = "dashed", color = "#02d6d6",
+             linewidth = 1) +
+  geom_bar(data = avg_side_pref_summary, 
+           aes(x = Age, y = avg_side_pref, fill = Age), 
+           stat = "identity", position = position_dodge(width = 0.9), 
+           linewidth = 0.7, alpha = 0.7, color = "black") +
+  facet_wrap(~Sex, labeller = labeller(Sex = c("F" = "Females", "M" = "Males"))) +
+  geom_errorbar(
+    data = avg_side_pref_summary,
+    aes(x = Age, ymin = avg_side_pref - sem_side_pref, 
+        ymax = avg_side_pref + sem_side_pref),
+    position = position_dodge(width = 0.9), 
+    width = 0.15, 
+    linewidth = 0.7
+  ) +
+  
+  geom_point(
+    data = avg_pref_df, 
+    aes(x = Age, y = avg_pref, fill = Age),  
+    position = position_jitterdodge(jitter.width = 0.1, dodge.width = 0.9),
+    shape = 21,
+    color = "black",
+    size = 2,
+    alpha = 0.7,
+    stroke = 0.7
+  ) +
+
+  scale_fill_manual(values = c(
+    "3 wk" = "#3E067D" ,
+    "6 wk" = "#F70065",
+    "18 wk" = "#277f80"
+  )) +
+
+  labs(title = "Average Side Preference (H2O Group)",
+       x = "",
+       y = "Avg R Side Preference",
+       fill = "Group") +
+  ylim(c(0,1)) +
+  theme_minimal() +
+  theme(legend.position = "none",
+    axis.text.x = element_text(face = "bold", angle = 45, 
+                                   hjust = 1, size = 14),
+        axis.text.y = element_text(face = "bold", size = 12),
+        axis.title.x = element_text(face = "bold", size = 14),
+        axis.title.y = element_text(face = "bold", size = 14, vjust = 3),
+        plot.title = element_text(face = "bold", size = 16),
+        strip.text = element_text(face = "bold", size = 14))
+
+ggsave(file.path(getwd(), "plots", "Avg R Side Pref.png"), 
+       width = 8, height = 5, units = "in", dpi = 600, bg = "white")
+
+
+model_avg_pref <- aov(R_side_pref ~ Age * Sex, data = side_pref_df)
+summary(model_avg_pref)
+# Main effect of Sex
+
+#--------------------------------
+
+#-------------------------------------------------------------------------------
+
+#-------------------------------------------------------------------------------
+
+```
